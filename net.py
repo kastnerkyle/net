@@ -195,70 +195,70 @@ class TrainingMixin(object):
         return train_fn
 
 
-# TODO: replace with softmax_cost?
-class Softmax(BaseMinet):
-    def __init__(self, input_variable, n_in=None, n_out=None, weights=None,
-                 biases=None):
-        if weights is None:
-            assert n_in is not None
-            assert n_out is not None
-            W = theano.shared(value=np.zeros((n_in, n_out),
-                                             dtype=theano.config.floatX),
-                              name='W', borrow=True)
-            b = theano.shared(value=np.zeros((n_out,),
-                                             dtype=theano.config.floatX),
-                              name='b', borrow=True)
-        else:
-            W = weights
-            b = biases
-
-        self.W = W
-        self.b = b
-        self.p_y_given_x = T.nnet.softmax(T.dot(input_variable, self.W) + self.b)
-        self.y_pred = T.argmax(self.p_y_given_x, axis=1)
-        self.params = [self.W, self.b]
-
-    def negative_log_likelihood(self, y):
-        return -T.mean(T.log(self.p_y_given_x)[T.arange(y.shape[0]), y])
+def build_linear_layer(input_size, output_size, input_variable, random_state):
+    W_values = np.asarray(random_state.uniform(
+        low=-np.sqrt(6. / (input_size + output_size)),
+        high=np.sqrt(6. / (input_size + output_size)),
+        size=(input_size, output_size)), dtype=theano.config.floatX)
+    W = theano.shared(value=W_values, name='W', borrow=True)
+    b_values = np.zeros((output_size,), dtype=theano.config.floatX)
+    b = theano.shared(value=b_values, name='b', borrow=True)
+    output_variable = T.dot(input_variable, W) + b
+    params = [W, b]
+    return output_variable, params
 
 
-# TODO: Replace with build_hidden_layer?
-class HiddenLayer(BaseMinet):
-    def __init__(self, input_variable, rng, n_in=None, n_out=None, weights=None,
-                 biases=None, activation=T.tanh):
-        self.input_variable = input_variable
-        if not weights:
-            assert n_in is not None
-            assert n_out is not None
-            W_values = np.asarray(rng.uniform(
-                low=-np.sqrt(6. / (n_in + n_out)),
-                high=np.sqrt(6. / (n_in + n_out)),
-                size=(n_in, n_out)), dtype=theano.config.floatX)
-            if activation == theano.tensor.nnet.sigmoid:
-                W_values *= 4
-
-            W = theano.shared(value=W_values, name='W', borrow=True)
-            b_values = np.zeros((n_out,), dtype=theano.config.floatX)
-            b = theano.shared(value=b_values, name='b', borrow=True)
-        else:
-            W = weights
-            b = biases
-
-        self.W = W
-        self.b = b
-
-        linear_output = T.dot(self.input_variable, self.W) + self.b
-        self.output = (linear_output if activation is None
-                       else activation(linear_output))
-        self.params = [self.W, self.b]
+def build_tanh_layer(input_size, output_size, input_variable, random_state):
+    W_values = np.asarray(random_state.uniform(
+        low=-np.sqrt(6. / (input_size + output_size)),
+        high=np.sqrt(6. / (input_size + output_size)),
+        size=(input_size, output_size)), dtype=theano.config.floatX)
+    W = theano.shared(value=W_values, name='W', borrow=True)
+    b_values = np.zeros((output_size,), dtype=theano.config.floatX)
+    b = theano.shared(value=b_values, name='b', borrow=True)
+    output_variable = T.tanh(T.dot(input_variable, W) + b)
+    params = [W, b]
+    return output_variable, params
 
 
-class MLP(BaseMinet, TrainingMixin):
+def build_relu_layer(input_size, output_size, input_variable, random_state):
+    W_values = np.asarray(random_state.uniform(
+        low=-np.sqrt(6. / (input_size + output_size)),
+        high=np.sqrt(6. / (input_size + output_size)),
+        size=(input_size, output_size)), dtype=theano.config.floatX)
+    W = theano.shared(value=W_values, name='W', borrow=True)
+    b_values = np.zeros((output_size,), dtype=theano.config.floatX)
+    b = theano.shared(value=b_values, name='b', borrow=True)
+
+    def relu(x):
+        return x * (x > 1e-6)
+    output_variable = relu(T.dot(input_variable, W) + b)
+    params = [W, b]
+    return output_variable, params
+
+
+def build_sigmoid_layer(input_size, output_size, input_variable, random_state):
+    W_values = np.asarray(random_state.uniform(
+        low=-np.sqrt(6. / (input_size + output_size)),
+        high=np.sqrt(6. / (input_size + output_size)),
+        size=(input_size, output_size)), dtype=theano.config.floatX)
+    W = theano.shared(value=4 * W_values, name='W', borrow=True)
+    b_values = np.zeros((output_size,), dtype=theano.config.floatX)
+    b = theano.shared(value=b_values, name='b', borrow=True)
+    output_variable = T.nnet.sigmoid(T.dot(input_variable, W) + b)
+    params = [W, b]
+    return output_variable, params
+
+
+def softmax_cost(y_hat_sym, y_sym):
+    return -T.mean(T.log(y_hat_sym)[T.arange(y_sym.shape[0]), y_sym])
+
+
+class FeedforwardClassifier(BaseMinet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[500], batch_size=100, max_iter=1E3,
-                 learning_rate=0.01,
-                 learning_alg="sgd",
-                 activation="tanh", model_save_name="saved_model",
-                 save_frequency=100, random_seed=None):
+                 learning_rate=0.01, learning_alg="sgd", activation="tanh",
+                 model_save_name="saved_model", save_frequency=100,
+                 random_seed=None):
 
         if random_seed is None or type(random_seed) is int:
             self.random_state = np.random.RandomState(random_seed)
@@ -271,53 +271,45 @@ class MLP(BaseMinet, TrainingMixin):
         self.learning_rate = learning_rate
         self.learning_alg = learning_alg
         if activation == "relu":
-            def relu(x):
-                return x * (x > 1e-6)
-            self.activation = relu
+            self.build_function = build_relu_layer
         elif activation == "tanh":
-            self.activation = T.tanh
+            self.build_function = build_tanh_layer
         elif activation == "sigmoid":
-            self.activation = T.nnet.sigmoid
+            self.build_function = build_sigmoid_layer
         else:
             raise ValueError("Value %s not understood for activation"
                              % activation)
 
     def _setup_functions(self, X_sym, y_sym, layer_sizes):
         input_variable = X_sym
-        for i, (n_in, n_out) in enumerate(zip(layer_sizes[:-1],
-                                              layer_sizes[1:-1])):
-            self.layers_.append(HiddenLayer(
-                rng=self.random_state,
-                input_variable=input_variable,
-                n_in=n_in, n_out=n_out,
-                activation=self.activation))
-            input_variable = self.layers_[-1].output
+        params = []
+        for i, (input_size, output_size) in enumerate(zip(layer_sizes[:-1],
+                                                          layer_sizes[1:-1])):
+            output_variable, layer_params = self.build_function(
+                input_size, output_size, input_variable, self.random_state)
+            params.extend(layer_params)
+            input_variable = output_variable
 
-        self.layers_.append(Softmax(input_variable=input_variable,
-                                    n_in=layer_sizes[-2],
-                                    n_out=layer_sizes[-1]))
-
-        self.negative_log_likelihood = self.layers_[-1].negative_log_likelihood
-
-        self.params = self.layers_[0].params
-        for hl in self.layers_[1:]:
-            self.params += hl.params
-        self.cost = self.negative_log_likelihood(y_sym)
-
-        self.loss_function = theano.function(
-            inputs=[X_sym, y_sym], outputs=self.negative_log_likelihood(y_sym))
-
-        self.predict_function = theano.function(
-            inputs=[X_sym], outputs=self.layers_[-1].y_pred)
+        output_variable, layer_params = build_linear_layer(
+            layer_sizes[-2], layer_sizes[-1], input_variable, self.random_state)
+        params.extend(layer_params)
+        y_hat_sym = T.nnet.softmax(output_variable)
+        cost = softmax_cost(y_hat_sym, y_sym)
 
         if self.learning_alg == "sgd":
-            self.fit_function = self.get_sgd_trainer(X_sym, y_sym, self.params,
-                                                     self.cost,
+            self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params, cost,
                                                      self.learning_rate)
         else:
             raise ValueError("Algorithm %s is not "
                              "a valid argument for learning_alg!"
                              % self.learning_alg)
+
+        self.loss_function = theano.function(
+            inputs=[X_sym, y_sym], outputs=cost)
+
+        self.predict_function = theano.function(
+            inputs=[X_sym],
+            outputs=[y_hat_sym],)
 
     def partial_fit(self, X, y):
         return self.fit_function(X, y.astype('int32'))
@@ -370,11 +362,10 @@ class MLP(BaseMinet, TrainingMixin):
         return self
 
     def predict(self, X):
-        return self.predict_function(X)
+        return np.argmax(self.predict_function(X), axis=1)
 
 
-# Start of RNN related code
-def build_recurrent_layer(inpt, wih, whh, bh, h0):
+def build_recurrent_tanh_layer(inpt, wih, whh, bh, h0):
     def step(x_t, h_tm1):
         h_t = T.tanh(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
         return h_t
@@ -407,10 +398,10 @@ def path_probs(predict, y_sym):
     return probabilities
 
 
-def ctc_cost(predict, y_sym):
-    forward_probs = path_probs(predict, y_sym)
-    backward_probs = path_probs(predict[::-1], y_sym[::-1])[::-1, ::-1]
-    probs = forward_probs * backward_probs / predict[:, y_sym]
+def ctc_cost(y_hat_sym, y_sym):
+    forward_probs = path_probs(y_hat_sym, y_sym)
+    backward_probs = path_probs(y_hat_sym[::-1], y_sym[::-1])[::-1, ::-1]
+    probs = forward_probs * backward_probs / y_hat_sym[:, y_sym]
     total_probs = T.sum(probs)
     return -T.log(total_probs)
 
@@ -453,7 +444,7 @@ def rnn_check_array(X):
     return X
 
 
-class RNN_CTC(BaseMinet, TrainingMixin):
+class RecurrentCTC(BaseMinet, TrainingMixin):
     """
     CTC cost based on code by Shawn Tan.
     """
@@ -480,14 +471,13 @@ class RNN_CTC(BaseMinet, TrainingMixin):
         bo = shared_rand((output_sz,), self.random_state)
         params = [wih, whh, who, bh, h0, bo]
 
-        hidden = build_recurrent_layer(X_sym, wih, whh, bh, h0)
+        hidden = build_recurrent_tanh_layer(X_sym, wih, whh, bh, h0)
 
         y_hat_sym = T.nnet.softmax(T.dot(hidden, who) + bo)
         cost = ctc_cost(y_hat_sym, y_sym)
 
         if self.learning_alg == "sgd":
-            self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params,
-                                                     cost,
+            self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params, cost,
                                                      self.learning_rate)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
