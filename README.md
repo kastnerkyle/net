@@ -1,5 +1,5 @@
-minet
-=====
+net
+===
 
-"A small library for testing implementations of neural networks and training
+"A library for testing implementations of neural networks and training
 algorithms"

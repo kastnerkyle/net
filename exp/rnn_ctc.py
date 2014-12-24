@@ -4,16 +4,10 @@ import numpy as np
 from net import RecurrentCTC
 import matplotlib.pyplot as plt
 
-nHidden = 9
-
 with open('data/data.pkl', 'rb') as pkl_file:
     data = pickle.load(pkl_file)
 
 nClasses = data['nChars']
-nDims = len(data['x'][0])
-nSamples = len(data['x'])
-nTrainSamples = nSamples * .75
-
 data_x, data_y = [], []
 for x, y in zip(data['x'], data['y']):
     # Need to make alternate characters blanks (index as nClasses)
@@ -29,7 +23,7 @@ train_y = data_y[:750]
 valid_y = data_y[750:]
 
 clf = RecurrentCTC(learning_alg="sgd", learning_rate=0.001,
-                   max_iter=20)
+                   max_iter=1999)
 clf.fit(train_x, train_y, valid_x, valid_y)
 clf.print_alignment(valid_x[0])
 plt.plot(clf.training_loss_, label="train")

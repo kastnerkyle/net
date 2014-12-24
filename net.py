@@ -1,3 +1,4 @@
+# -*- coding: utf 8 -*-
 try:
     import cPickle
 except ImportError:
@@ -303,7 +304,6 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
             raise ValueError("Algorithm %s is not "
                              "a valid argument for learning_alg!"
                              % self.learning_alg)
-
         self.loss_function = theano.function(
             inputs=[X_sym, y_sym], outputs=cost)
 
@@ -449,13 +449,12 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
     CTC cost based on code by Shawn Tan.
     """
     def __init__(self, hidden_layer_sizes=[9], max_iter=100,
-                 learning_rate=0.01, learning_alg="sgd", adagrad_param=1E-6,
-                 random_seed=1999):
+                 learning_rate=0.01, learning_alg="sgd", random_seed=None):
+        if random_seed is None or type(random_seed) is int:
+            self.random_state = np.random.RandomState(random_seed)
         self.learning_rate = learning_rate
-        self.adagrad_param = adagrad_param
         self.learning_alg = learning_alg
         self.hidden_layer_sizes = hidden_layer_sizes
-        self.random_state = np.random.RandomState(random_seed)
         self.max_iter = int(max_iter)
 
     def _setup_functions(self, X_sym, y_sym, layer_sizes):
