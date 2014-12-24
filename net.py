@@ -7,7 +7,6 @@ import tarfile
 import tempfile
 import os
 import numpy as np
-import time
 import glob
 import theano
 import theano.tensor as T
@@ -182,85 +181,6 @@ class BaseMinet(object):
         self.__dict__ = state
 
 
-class BaseFeedforward(object):
-    def __init__(self, hidden_layer_sizes, batch_size, max_iter,
-                 random_seed, save_frequency, model_save_name):
-        if random_seed is None or type(random_seed) is int:
-            self.random_state = np.random.RandomState(random_seed)
-        self.max_iter = max_iter
-        self.save_frequency = save_frequency
-        self.hidden_layer_sizes = hidden_layer_sizes
-        self.batch_size = batch_size
-        self.model_save_name = model_save_name
-
-    def partial_fit(self, X, y):
-        return self.fit_function(X, y.astype('int32'))
-
-    def fit(self, X, y, valid_X=None, valid_y=None):
-        input_size = X.shape[1]
-        output_size = len(np.unique(y))
-        X_sym = T.matrix('x')
-        y_sym = T.ivector('y')
-        self.layers_ = []
-        self.layer_sizes_ = [input_size]
-        self.layer_sizes_.extend(self.hidden_layer_sizes)
-        self.layer_sizes_.append(output_size)
-        self.dropout_layers_ = []
-        self.training_scores_ = []
-        self.validation_scores_ = []
-        self.training_loss_ = []
-        self.validation_loss_ = []
-
-        if not hasattr(self, 'fit_function'):
-            self._setup_functions(X_sym, y_sym,
-                                  self.layer_sizes_)
-
-        batch_indices = list(range(0, X.shape[0], self.batch_size))
-        if X.shape[0] != batch_indices[-1]:
-            batch_indices.append(X.shape[0])
-
-        start_time = time.clock()
-        itr = 0
-        best_validation_score = np.inf
-        while (itr < self.max_iter):
-            print("Starting pass %d through the dataset" % itr)
-            itr += 1
-            batch_bounds = list(zip(batch_indices[:-1], batch_indices[1:]))
-            # Random minibatches
-            self.random_state.shuffle(batch_bounds)
-            for start, end in batch_bounds:
-                self.partial_fit(X[start:end], y[start:end])
-            current_training_score = (self.predict(X) != y).mean()
-            self.training_scores_.append(current_training_score)
-            current_training_loss = self.loss_function(X, y)
-            self.training_loss_.append(current_training_loss)
-            # Serialize each save_frequency iteration
-            if (itr % self.save_frequency) == 0 or (itr == self.max_iter):
-                f = open(self.model_save_name + "_snapshot.pkl", 'wb')
-                cPickle.dump(self, f, protocol=2)
-                f.close()
-            if valid_X is not None:
-                current_validation_score = (
-                    self.predict(valid_X) != valid_y).mean()
-                self.validation_scores_.append(current_validation_score)
-                current_training_loss = self.loss_function(valid_X, valid_y)
-                self.validation_loss_.append(current_training_loss)
-                print("Validation score %f" % current_validation_score)
-                # if we got the best validation score until now, save
-                if current_validation_score < best_validation_score:
-                    best_validation_score = current_validation_score
-                    f = open(self.model_save_name + "_best.pkl", 'wb')
-                    cPickle.dump(self, f, protocol=2)
-                    f.close()
-        end_time = time.clock()
-        print("Total training time ran for %.2fm" %
-              ((end_time - start_time) / 60.))
-        return self
-
-    def predict(self, X):
-        return self.predict_function(X)
-
-
 class TrainingMixin(object):
     def get_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate):
         """ Returns a simple sgd trainer."""
@@ -268,30 +188,6 @@ class TrainingMixin(object):
         updates = OrderedDict()
         for param, gparam in zip(params, gparams):
             updates[param] = param - learning_rate * gparam
-
-        train_fn = theano.function(inputs=[X_sym, y_sym],
-                                   outputs=cost,
-                                   updates=updates)
-        return train_fn
-
-    def get_adagrad_trainer(self, X_sym, y_sym, params, cost, learning_rate,
-                            adagrad_param):
-        gparams = T.grad(cost, params)
-        self.accumulated_gradients_ = []
-        accumulated_gradients_ = self.accumulated_gradients_
-
-        for layer in self.layers_:
-            accumulated_gradients_.extend([shared_zeros(p.shape.eval(),
-                                           'accumulated_gradient')
-                                           for p in layer.params])
-        updates = OrderedDict()
-        for agrad, param, gparam in zip(accumulated_gradients_,
-                                        params, gparams):
-            ag = agrad + gparam * gparam
-            # TODO: Norm clipping
-            updates[param] = param - (learning_rate / T.sqrt(
-                ag + adagrad_param)) * gparam
-            updates[agrad] = ag
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
@@ -325,14 +221,6 @@ class Softmax(BaseMinet):
     def negative_log_likelihood(self, y):
         return -T.mean(T.log(self.p_y_given_x)[T.arange(y.shape[0]), y])
 
-    def errors(self, y):
-        if y.ndim != self.y_pred.ndim:
-            raise TypeError('y should have the same shape as self.y_pred')
-        if y.dtype.startswith('int'):
-            return T.mean(T.neq(self.y_pred, y))
-        else:
-            raise NotImplementedError()
-
 
 # TODO: Replace with build_hidden_layer?
 class HiddenLayer(BaseMinet):
@@ -365,25 +253,23 @@ class HiddenLayer(BaseMinet):
         self.params = [self.W, self.b]
 
 
-class MLP(BaseMinet, BaseFeedforward, TrainingMixin):
+class MLP(BaseMinet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[500], batch_size=100, max_iter=1E3,
-                 dropout=True, learning_rate=0.01, l1_reg=0., l2_reg=1E-4,
-                 learning_alg="sgd", adagrad_param=1E-6, adadelta_param=0.9,
+                 learning_rate=0.01,
+                 learning_alg="sgd",
                  activation="tanh", model_save_name="saved_model",
                  save_frequency=100, random_seed=None):
 
-        super(MLP, self).__init__(hidden_layer_sizes=hidden_layer_sizes,
-                                  batch_size=batch_size, max_iter=max_iter,
-                                  random_seed=random_seed,
-                                  save_frequency=save_frequency,
-                                  model_save_name=model_save_name)
-        self.dropout = dropout
+        if random_seed is None or type(random_seed) is int:
+            self.random_state = np.random.RandomState(random_seed)
+        self.max_iter = int(max_iter)
+        self.save_frequency = save_frequency
+        self.hidden_layer_sizes = hidden_layer_sizes
+        self.batch_size = batch_size
+        self.model_save_name = model_save_name
+
         self.learning_rate = learning_rate
         self.learning_alg = learning_alg
-        self.adagrad_param = adagrad_param
-        self.adadelta_param = adadelta_param
-        self.l1_reg = l1_reg
-        self.l2_reg = l2_reg
         if activation == "relu":
             def relu(x):
                 return x * (x > 1e-6)
@@ -400,58 +286,24 @@ class MLP(BaseMinet, BaseFeedforward, TrainingMixin):
         input_variable = X_sym
         for i, (n_in, n_out) in enumerate(zip(layer_sizes[:-1],
                                               layer_sizes[1:-1])):
-            keep_prob = 0.8 if i == 0 else 0.5
-            if not self.dropout:
-                keep_prob = 1.0
             self.layers_.append(HiddenLayer(
                 rng=self.random_state,
-                input_variable=keep_prob * input_variable,
+                input_variable=input_variable,
                 n_in=n_in, n_out=n_out,
                 activation=self.activation))
-
-            dropout_input_variable = dropout(self.random_state, input_variable,
-                                             keep_prob=keep_prob)
-            W, b = self.layers_[-1].params
-            self.dropout_layers_.append(HiddenLayer(
-                rng=self.random_state,
-                input_variable=dropout_input_variable,
-                weights=W, biases=b,
-                activation=self.activation))
-
             input_variable = self.layers_[-1].output
 
-        keep_prob = 0.5
-        if self.dropout:
-            keep_prob = 1.0
-        self.layers_.append(Softmax(input_variable=keep_prob * input_variable,
+        self.layers_.append(Softmax(input_variable=input_variable,
                                     n_in=layer_sizes[-2],
                                     n_out=layer_sizes[-1]))
 
-        dropout_input_variable = dropout(self.random_state, input_variable,
-                                         keep_prob=keep_prob)
-        W, b = self.layers_[-1].params
-        self.dropout_layers_.append(Softmax(input_variable=dropout_input_variable,
-                                    weights=W, biases=b,
-                                    n_out=layer_sizes[-1]))
-
-        self.l1 = 0
-        for hl in self.layers_:
-            self.l1 += abs(hl.W).sum()
-
-        self.l2_sqr = 0.
-        for hl in self.layers_:
-            self.l2_sqr += (hl.W ** 2).sum()
-
-        self.negative_log_likelihood = self.dropout_layers_[-1].negative_log_likelihood
+        self.negative_log_likelihood = self.layers_[-1].negative_log_likelihood
 
         self.params = self.layers_[0].params
         for hl in self.layers_[1:]:
             self.params += hl.params
         self.cost = self.negative_log_likelihood(y_sym)
-        self.cost += self.l1_reg * self.l1
-        self.cost += self.l2_reg * self.l2_sqr
 
-        self.errors = self.layers_[-1].errors
         self.loss_function = theano.function(
             inputs=[X_sym, y_sym], outputs=self.negative_log_likelihood(y_sym))
 
@@ -462,18 +314,66 @@ class MLP(BaseMinet, BaseFeedforward, TrainingMixin):
             self.fit_function = self.get_sgd_trainer(X_sym, y_sym, self.params,
                                                      self.cost,
                                                      self.learning_rate)
-        elif self.learning_alg == "adagrad":
-            self.fit_function = self.get_adagrad_trainer(X_sym, y_sym,
-                                                         self.params,
-                                                         self.cost,
-                                                         self.learning_rate,
-                                                         self.adagrad_param)
         else:
             raise ValueError("Algorithm %s is not "
                              "a valid argument for learning_alg!"
                              % self.learning_alg)
 
+    def partial_fit(self, X, y):
+        return self.fit_function(X, y.astype('int32'))
 
+    def fit(self, X, y, valid_X=None, valid_y=None):
+        input_size = X.shape[1]
+        output_size = len(np.unique(y))
+        X_sym = T.matrix('x')
+        y_sym = T.ivector('y')
+        self.layers_ = []
+        self.layer_sizes_ = [input_size]
+        self.layer_sizes_.extend(self.hidden_layer_sizes)
+        self.layer_sizes_.append(output_size)
+        self.training_loss_ = []
+        self.validation_loss_ = []
+
+        if not hasattr(self, 'fit_function'):
+            self._setup_functions(X_sym, y_sym,
+                                  self.layer_sizes_)
+
+        batch_indices = list(range(0, X.shape[0], self.batch_size))
+        if X.shape[0] != batch_indices[-1]:
+            batch_indices.append(X.shape[0])
+
+        best_valid_loss = np.inf
+        for itr in range(self.max_iter):
+            print("Starting pass %d through the dataset" % itr)
+            batch_bounds = list(zip(batch_indices[:-1], batch_indices[1:]))
+            # Random minibatches
+            self.random_state.shuffle(batch_bounds)
+            for start, end in batch_bounds:
+                self.partial_fit(X[start:end], y[start:end])
+            current_train_loss = self.loss_function(X, y)
+            self.training_loss_.append(current_train_loss)
+            # Serialize each save_frequency iteration
+            if (itr % self.save_frequency) == 0 or (itr == self.max_iter):
+                f = open(self.model_save_name + "_snapshot.pkl", 'wb')
+                cPickle.dump(self, f, protocol=2)
+                f.close()
+            if valid_X is not None:
+                current_valid_loss = self.loss_function(valid_X, valid_y)
+                self.validation_loss_.append(current_valid_loss)
+                print("Validation loss %f" % current_valid_loss)
+                # if we got the best validation score until now, save
+                if current_valid_loss < best_valid_loss:
+                    best_valid_loss = current_valid_loss
+                    f = open(self.model_save_name + "_best.pkl", 'wb')
+                    cPickle.dump(self, f, protocol=2)
+                    f.close()
+        return self
+
+    def predict(self, X):
+        return self.predict_function(X)
+
+
+# Start of RNN related code
 def build_recurrent_layer(inpt, wih, whh, bh, h0):
     def step(x_t, h_tm1):
         h_t = T.tanh(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
@@ -565,7 +465,7 @@ class RNN_CTC(BaseMinet, TrainingMixin):
         self.learning_alg = learning_alg
         self.hidden_layer_sizes = hidden_layer_sizes
         self.random_state = np.random.RandomState(random_seed)
-        self.max_iter = max_iter
+        self.max_iter = int(max_iter)
 
     def _setup_functions(self, X_sym, y_sym, layer_sizes):
         input_sz = layer_sizes[0]
@@ -616,6 +516,8 @@ class RNN_CTC(BaseMinet, TrainingMixin):
         self.training_loss_ = []
         if valid_X is not None:
             self.validation_loss_ = []
+
+        best_valid_loss = np.inf
         for itr in range(self.max_iter):
             print("Starting pass %d through the dataset" % itr)
             average_train_loss = 0
@@ -625,11 +527,13 @@ class RNN_CTC(BaseMinet, TrainingMixin):
             self.training_loss_.append(average_train_loss / len(X))
 
             if valid_X is not None:
-                average_valid_loss = 0
+                total_valid_loss = 0
                 for n in range(len(valid_X)):
                     valid_loss = self.loss_function(valid_X[n], valid_y[n])
-                    average_valid_loss += valid_loss
-                self.validation_loss_.append(average_valid_loss / len(valid_X))
+                    total_valid_loss += valid_loss
+                current_valid_loss = average_train_loss / len(valid_X)
+                print("Validation loss %f" % current_valid_loss)
+                self.validation_loss_.append(current_valid_loss)
 
     def predict(self, X):
         X = rnn_check_array(X)
