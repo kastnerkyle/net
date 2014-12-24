@@ -1,4 +1,5 @@
-net
-===
+minet
+=====
 
-Neural networks in Theano
+"A small library for testing implementations of neural networks and training
+algorithms"
