@@ -17,6 +17,14 @@ import sys
 from theano.tensor.shared_randomstreams import RandomStreams
 
 
+def relu(x):
+    return x * (x > 1e-6)
+
+
+def clip_relu(x, clip_lim=20):
+    return x * (T.lt(x, 1e-6) and T.gt(x, clip_lim))
+
+
 def dropout(random_state, X, keep_prob=0.5):
     if keep_prob > 0. and keep_prob < 1.:
         seed = random_state.randint(2 ** 30)
@@ -231,8 +239,6 @@ def build_relu_layer(input_size, output_size, input_variable, random_state):
     b_values = np.zeros((output_size,), dtype=theano.config.floatX)
     b = theano.shared(value=b_values, name='b', borrow=True)
 
-    def relu(x):
-        return x * (x > 1e-6)
     output_variable = relu(T.dot(input_variable, W) + b)
     params = [W, b]
     return output_variable, params
@@ -264,9 +270,9 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
         if random_seed is None or type(random_seed) is int:
             self.random_state = np.random.RandomState(random_seed)
         self.max_iter = int(max_iter)
-        self.save_frequency = save_frequency
         self.hidden_layer_sizes = hidden_layer_sizes
         self.batch_size = batch_size
+        self.save_frequency = save_frequency
         self.model_save_name = model_save_name
 
         self.learning_rate = learning_rate
@@ -296,6 +302,8 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
         params.extend(layer_params)
         y_hat_sym = T.nnet.softmax(output_variable)
         cost = softmax_cost(y_hat_sym, y_sym)
+
+        self.params = params
 
         if self.learning_alg == "sgd":
             self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params, cost,
@@ -344,11 +352,12 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
                 self.partial_fit(X[start:end], y[start:end])
             current_train_loss = self.loss_function(X, y)
             self.training_loss_.append(current_train_loss)
-            # Serialize each save_frequency iteration
+
             if (itr % self.save_frequency) == 0 or (itr == self.max_iter):
                 f = open(self.model_save_name + "_snapshot.pkl", 'wb')
                 cPickle.dump(self, f, protocol=2)
                 f.close()
+
             if valid_X is not None:
                 current_valid_loss = self.loss_function(valid_X, valid_y)
                 self.validation_loss_.append(current_valid_loss)
@@ -365,17 +374,50 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
         return np.argmax(self.predict_function(X), axis=1)
 
 
-def build_recurrent_tanh_layer(inpt, wih, whh, bh, h0):
+def build_recurrent_tanh_layer(input_size, hidden_size, output_size,
+                               input_variable, random_state):
+    wih = shared_rand((input_size, hidden_size), random_state)  # input to hidden
+    whh = shared_rand((hidden_size, hidden_size), random_state)  # hidden to hidden
+    # whh is a matrix means all hidden units are fully inter-connected
+    who = shared_rand((hidden_size, output_size), random_state)  # hidden to output
+    bh = shared_rand((hidden_size,), random_state)
+    h0 = shared_rand((hidden_size,), random_state)
+    bo = shared_rand((output_size,), random_state)
+    params = [wih, bh, whh, h0, who, bo]
+
     def step(x_t, h_tm1):
         h_t = T.tanh(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
         return h_t
 
     hidden, _ = theano.scan(
         step,
-        sequences=[inpt],
+        sequences=[input_variable],
         outputs_info=[h0]
     )
-    return hidden
+    return hidden, params
+
+
+def build_recurrent_relu_layer(input_size, hidden_size, output_size,
+                               input_variable, random_state):
+    wih = shared_rand((input_size, hidden_size), random_state)  # input to hidden
+    whh = shared_rand((hidden_size, hidden_size), random_state)  # hidden to hidden
+    # whh is a matrix means all hidden units are fully inter-connected
+    who = shared_rand((hidden_size, output_size), random_state)  # hidden to output
+    bh = shared_rand((hidden_size,), random_state)
+    h0 = shared_rand((hidden_size,), random_state)
+    bo = shared_rand((output_size,), random_state)
+    params = [wih, bh, whh, h0, who, bo]
+
+    def step(x_t, h_tm1):
+        h_t = clip_relu(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
+        return h_t
+
+    hidden, _ = theano.scan(
+        step,
+        sequences=[input_variable],
+        outputs_info=[h0]
+    )
+    return hidden, params
 
 
 def recurrence_relation(size):
@@ -448,32 +490,37 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
     """
     CTC cost based on code by Shawn Tan.
     """
-    def __init__(self, hidden_layer_sizes=[9], max_iter=100,
-                 learning_rate=0.01, learning_alg="sgd", random_seed=None):
+    def __init__(self, hidden_layer_sizes=[9], max_iter=1E2,
+                 learning_rate=0.01, learning_alg="sgd", activation="tanh",
+                 save_frequency=10, model_save_name="saved_model",
+                 random_seed=None):
         if random_seed is None or type(random_seed) is int:
             self.random_state = np.random.RandomState(random_seed)
         self.learning_rate = learning_rate
         self.learning_alg = learning_alg
         self.hidden_layer_sizes = hidden_layer_sizes
         self.max_iter = int(max_iter)
+        self.save_frequency = save_frequency
+        self.model_save_name = model_save_name
+        if activation == "tanh":
+            self.build_function = build_recurrent_tanh_layer
+        elif activation == "relu":
+            self.build_function = build_recurrent_relu_layer
+        else:
+            raise ValueError("Value %s not understood for activation"
+                             % activation)
 
     def _setup_functions(self, X_sym, y_sym, layer_sizes):
-        input_sz = layer_sizes[0]
-        hidden_sz = layer_sizes[1]
-        output_sz = layer_sizes[-1]
-        wih = shared_rand((input_sz, hidden_sz), self.random_state)  # input to hidden
-        whh = shared_rand((hidden_sz, hidden_sz), self.random_state)  # hidden to hidden
-        # whh is a matrix means all hidden units are fully inter-connected
-        who = shared_rand((hidden_sz, output_sz), self.random_state)  # hidden to output
-        bh = shared_rand((hidden_sz,), self.random_state)
-        h0 = shared_rand((hidden_sz,), self.random_state)
-        bo = shared_rand((output_sz,), self.random_state)
-        params = [wih, whh, who, bh, h0, bo]
+        hidden, params = self.build_function(layer_sizes[0], layer_sizes[1],
+                                             layer_sizes[-1], X_sym,
+                                             self.random_state)
+        Wo = params[-2]
+        bo = params[-1]
 
-        hidden = build_recurrent_tanh_layer(X_sym, wih, whh, bh, h0)
-
-        y_hat_sym = T.nnet.softmax(T.dot(hidden, who) + bo)
+        y_hat_sym = T.nnet.softmax(T.dot(hidden, Wo) + bo)
         cost = ctc_cost(y_hat_sym, y_sym)
+
+        self.params = params
 
         if self.learning_alg == "sgd":
             self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params, cost,
@@ -509,20 +556,30 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
         best_valid_loss = np.inf
         for itr in range(self.max_iter):
             print("Starting pass %d through the dataset" % itr)
-            average_train_loss = 0
+            total_train_loss = 0
             for n in range(len(X)):
                 train_loss = self.fit_function(X[n], y[n])
-                average_train_loss += train_loss
-            self.training_loss_.append(average_train_loss / len(X))
+                total_train_loss += train_loss
+            self.training_loss_.append(total_train_loss / len(X))
+
+            if (itr % self.save_frequency) == 0 or (itr == self.max_iter):
+                f = open(self.model_save_name + "_snapshot.pkl", 'wb')
+                cPickle.dump(self, f, protocol=2)
+                f.close()
 
             if valid_X is not None:
                 total_valid_loss = 0
                 for n in range(len(valid_X)):
                     valid_loss = self.loss_function(valid_X[n], valid_y[n])
                     total_valid_loss += valid_loss
-                current_valid_loss = average_train_loss / len(valid_X)
+                current_valid_loss = total_valid_loss / len(valid_X)
                 print("Validation loss %f" % current_valid_loss)
                 self.validation_loss_.append(current_valid_loss)
+                if current_valid_loss < best_valid_loss:
+                    best_valid_loss = current_valid_loss
+                    f = open(self.model_save_name + "_best.pkl", 'wb')
+                    cPickle.dump(self, f, protocol=2)
+                    f.close()
 
     def predict(self, X):
         X = rnn_check_array(X)

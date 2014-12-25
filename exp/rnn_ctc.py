@@ -23,7 +23,7 @@ train_y = data_y[:750]
 valid_y = data_y[750:]
 
 clf = RecurrentCTC(learning_alg="sgd", learning_rate=0.001,
-                   max_iter=1999)
+                   activation="tanh", random_seed=1999)
 clf.fit(train_x, train_y, valid_x, valid_y)
 clf.print_alignment(valid_x[0])
 plt.plot(clf.training_loss_, label="train")
