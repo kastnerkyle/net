@@ -8,10 +8,12 @@ import tarfile
 import tempfile
 import os
 import numpy as np
+from scipy import linalg
 import glob
 import theano
 import theano.tensor as T
 from theano.compat.python2x import OrderedDict
+import warnings
 import sys
 # Sandbox?
 from theano.tensor.shared_randomstreams import RandomStreams
@@ -42,16 +44,23 @@ def fast_dropout(random_state, X):
     return X * mask
 
 
-def shared_zeros(shape, name):
+def shared_zeros(shape):
     """ Builds a theano shared variable filled with a zeros numpy array """
-    return theano.shared(value=np.zeros(shape, dtype=theano.config.floatX),
-                         name=name, borrow=True)
+    return theano.shared(value=np.zeros(*shape).astype(theano.config.floatX),
+                         borrow=True)
 
 
-def shared_rand(shape, rng, name=None):
+def shared_rand(shape, rng):
     """ Builds a theano shared variable filled with random values """
     return theano.shared(value=(rng.rand(*shape) - 0.5).astype(
-        theano.config.floatX))
+        theano.config.floatX), borrow=True)
+
+
+def shared_ortho(shape, rng, name=None):
+    """ Builds a theano shared variable filled with random values """
+    g = rng.randn(*shape)
+    o_g = linalg.svd(g)[0]
+    return theano.shared(value=o_g.astype(theano.config.floatX), borrow=True)
 
 
 def load_mnist():
@@ -238,7 +247,6 @@ def build_relu_layer(input_size, output_size, input_variable, random_state):
     W = theano.shared(value=W_values, name='W', borrow=True)
     b_values = np.zeros((output_size,), dtype=theano.config.floatX)
     b = theano.shared(value=b_values, name='b', borrow=True)
-
     output_variable = relu(T.dot(input_variable, W) + b)
     params = [W, b]
     return output_variable, params
@@ -278,11 +286,11 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
         self.learning_rate = learning_rate
         self.learning_alg = learning_alg
         if activation == "relu":
-            self.build_function = build_relu_layer
+            self.feedforward_function = build_relu_layer
         elif activation == "tanh":
-            self.build_function = build_tanh_layer
+            self.feedforward_function = build_tanh_layer
         elif activation == "sigmoid":
-            self.build_function = build_sigmoid_layer
+            self.feedforward_function = build_sigmoid_layer
         else:
             raise ValueError("Value %s not understood for activation"
                              % activation)
@@ -292,7 +300,7 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
         params = []
         for i, (input_size, output_size) in enumerate(zip(layer_sizes[:-1],
                                                           layer_sizes[1:-1])):
-            output_variable, layer_params = self.build_function(
+            output_variable, layer_params = self.feedforward_function(
                 input_size, output_size, input_variable, self.random_state)
             params.extend(layer_params)
             input_variable = output_variable
@@ -376,13 +384,12 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
 
 def build_recurrent_tanh_layer(input_size, hidden_size, output_size,
                                input_variable, random_state):
-    wih = shared_rand((input_size, hidden_size), random_state)  # input to hidden
-    whh = shared_rand((hidden_size, hidden_size), random_state)  # hidden to hidden
-    # whh is a matrix means all hidden units are fully inter-connected
-    who = shared_rand((hidden_size, output_size), random_state)  # hidden to output
-    bh = shared_rand((hidden_size,), random_state)
-    h0 = shared_rand((hidden_size,), random_state)
-    bo = shared_rand((output_size,), random_state)
+    wih = shared_rand((input_size, hidden_size), random_state)
+    whh = shared_ortho((hidden_size, hidden_size), random_state)
+    who = shared_rand((hidden_size, output_size), random_state)
+    bh = shared_zeros((hidden_size,))
+    h0 = shared_zeros((hidden_size,))
+    bo = shared_zeros((output_size,))
     params = [wih, bh, whh, h0, who, bo]
 
     def step(x_t, h_tm1):
@@ -399,13 +406,12 @@ def build_recurrent_tanh_layer(input_size, hidden_size, output_size,
 
 def build_recurrent_relu_layer(input_size, hidden_size, output_size,
                                input_variable, random_state):
-    wih = shared_rand((input_size, hidden_size), random_state)  # input to hidden
-    whh = shared_rand((hidden_size, hidden_size), random_state)  # hidden to hidden
-    # whh is a matrix means all hidden units are fully inter-connected
-    who = shared_rand((hidden_size, output_size), random_state)  # hidden to output
-    bh = shared_rand((hidden_size,), random_state)
-    h0 = shared_rand((hidden_size,), random_state)
-    bo = shared_rand((output_size,), random_state)
+    wih = shared_rand((input_size, hidden_size), random_state)
+    whh = shared_ortho((hidden_size, hidden_size), random_state)
+    who = shared_rand((hidden_size, output_size), random_state)
+    bh = shared_zeros((hidden_size,))
+    h0 = shared_zeros((hidden_size,))
+    bo = shared_zeros((output_size,))
     params = [wih, bh, whh, h0, who, bo]
 
     def step(x_t, h_tm1):
@@ -418,6 +424,68 @@ def build_recurrent_relu_layer(input_size, hidden_size, output_size,
         outputs_info=[h0]
     )
     return hidden, params
+
+
+def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
+                               input_variable, random_state):
+    h0 = shared_zeros((hidden_size,))
+    c0 = shared_zeros((hidden_size,))
+    who = shared_rand((hidden_size, output_size), random_state)
+    bo = shared_zeros((output_size,))
+
+    # Input gate weights
+    wxig = shared_rand((hidden_size, input_size), random_state)
+    whig = shared_ortho((hidden_size, hidden_size), random_state)
+    wcig = shared_ortho((hidden_size, hidden_size), random_state)
+
+    # Forget gate weights
+    wxfg = shared_rand((hidden_size, input_size), random_state)
+    whfg = shared_ortho((hidden_size, hidden_size), random_state)
+    wcfg = shared_ortho((hidden_size, hidden_size), random_state)
+
+    # Output gate weights
+    wxog = shared_rand((hidden_size, input_size), random_state)
+    whog = shared_ortho((hidden_size, hidden_size), random_state)
+    wcog = shared_ortho((hidden_size, hidden_size), random_state)
+
+    # Cell weights
+    wxc = shared_rand((hidden_size, input_size), random_state)
+    whc = shared_ortho((hidden_size, hidden_size), random_state)
+
+    # Input gate bias
+    big = shared_zeros((hidden_size,))
+
+    # Forget gate bias
+    bfg = shared_zeros((hidden_size,))
+
+    # Output gate bias
+    bog = shared_zeros((hidden_size,))
+
+    # Cell bias
+    bc = shared_zeros((hidden_size,))
+
+    params = [wxig, whig, wcig,
+              wxfg, whfg, wcfg,
+              wxog, whog, wcog,
+              wxc, whc, big, bfg, bog, bc,
+              h0, c0, who, bo]
+
+    def step(x_t, h_tm1, c_tm1):
+        i_t = T.nnet.sigmoid(T.dot(wxig, x_t) + T.dot(whig, h_tm1) +
+                             T.dot(wcig, c_tm1) + big)
+        f_t = T.nnet.sigmoid(T.dot(wxfg, x_t) + T.dot(whfg, h_tm1) +
+                             T.dot(wcfg, c_tm1) + bfg)
+        c_t = f_t * c_tm1 + i_t * T.tanh(T.dot(wxc, x_t) +
+                                         T.dot(whc, h_tm1) + bc)
+        o_t = T.nnet.sigmoid(T.dot(wxog, x_t) + T.dot(whog, h_tm1) +
+                             T.dot(wcog, c_t) + bog)
+        h_t = o_t * T.tanh(c_t)
+        return h_t, c_t
+
+    [hidden, cell], _ = theano.scan(step,
+                                    sequences=[input_variable],
+                                    outputs_info=[h0, c0])
+    return hidden, cell, params
 
 
 def recurrence_relation(size):
@@ -490,8 +558,9 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
     """
     CTC cost based on code by Shawn Tan.
     """
-    def __init__(self, hidden_layer_sizes=[9], max_iter=1E2,
-                 learning_rate=0.01, learning_alg="sgd", activation="tanh",
+    def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
+                 learning_rate=0.01, learning_alg="sgd",
+                 recurrent_activation="tanh", feedforward_activation="tanh",
                  save_frequency=10, model_save_name="saved_model",
                  random_seed=None):
         if random_seed is None or type(random_seed) is int:
@@ -502,22 +571,56 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
         self.max_iter = int(max_iter)
         self.save_frequency = save_frequency
         self.model_save_name = model_save_name
-        if activation == "tanh":
-            self.build_function = build_recurrent_tanh_layer
-        elif activation == "relu":
-            self.build_function = build_recurrent_relu_layer
+        self.recurrent_activation = recurrent_activation
+        if recurrent_activation == "tanh":
+            self.recurrent_function = build_recurrent_tanh_layer
+        elif recurrent_activation == "relu":
+            self.recurrent_function = build_recurrent_relu_layer
+        elif recurrent_activation == "lstm":
+            self.recurrent_function = build_recurrent_lstm_layer
         else:
-            raise ValueError("Value %s not understood for activation"
-                             % activation)
+            raise ValueError("Value %s not understood for recurrent_activation"
+                             % recurrent_activation)
+        if feedforward_activation == "tanh":
+            self.feedforward_activation = T.tanh
+        elif feedforward_activation == "relu":
+            self.feedforward_activation = relu
+        else:
+            raise ValueError("Value %s not understood" % feedforward_activation,
+                             "for feedforward_activation")
 
     def _setup_functions(self, X_sym, y_sym, layer_sizes):
-        hidden, params = self.build_function(layer_sizes[0], layer_sizes[1],
-                                             layer_sizes[-1], X_sym,
-                                             self.random_state)
-        Wo = params[-2]
-        bo = params[-1]
+        input_variable = X_sym
+        if len(layer_sizes) % 2 == 0:
+            # If there aren't the right number of layer sizes, add a layer of
+            # the same size as the output
+            warnings.warn("Length of layer_sizes needs to be odd!\n"
+                          "Adding output layer of size %i" % layer_sizes[-1])
+            layer_sizes.append(layer_sizes[-1])
 
-        y_hat_sym = T.nnet.softmax(T.dot(hidden, Wo) + bo)
+        # Iterate in chunks of 3 creating recurrent layers
+        for i in range(0, len(layer_sizes) - 2, 2):
+            current_layers = layer_sizes[i:i+3]
+            input_size, hidden_size, output_size = current_layers
+            if self.recurrent_activation != "lstm":
+                hidden, params = self.recurrent_function(
+                    input_size, hidden_size, output_size, input_variable,
+                    self.random_state)
+            else:
+                hidden, cell, params = self.recurrent_function(
+                    input_size, hidden_size, output_size, input_variable,
+                    self.random_state)
+
+            Wo = params[-2]
+            bo = params[-1]
+            # Need last activation to be linear for CTC cost
+            if i == (len(layer_sizes) - 3):
+                input_variable = T.dot(hidden, Wo) + bo
+            else:
+                input_variable = self.feedforward_activation(
+                    T.dot(hidden, Wo) + bo)
+
+        y_hat_sym = T.nnet.softmax(input_variable)
         cost = ctc_cost(y_hat_sym, y_sym)
 
         self.params = params
