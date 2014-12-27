@@ -93,18 +93,17 @@ def load_mnist():
         train_set, valid_set, test_set = cPickle.load(f)
     f.close()
 
-    test_set_x, test_set_y = test_set
-    test_set_x = test_set_x.astype('float32')
-    test_set_y = test_set_y.astype('int32')
-    valid_set_x, valid_set_y = valid_set
-    valid_set_x = valid_set_x.astype('float32')
-    valid_set_y = valid_set_y.astype('int32')
-    train_set_x, train_set_y = train_set
-    train_set_x = train_set_x.astype('float32')
-    train_set_y = train_set_y.astype('int32')
+    test_x, test_y = test_set
+    test_x = test_x.astype('float32')
+    test_y = test_y.astype('int32')
+    valid_x, valid_y = valid_set
+    valid_x = valid_x.astype('float32')
+    valid_y = valid_y.astype('int32')
+    train_x, train_y = train_set
+    train_x = train_x.astype('float32')
+    train_y = train_y.astype('int32')
 
-    rval = [(train_set_x, train_set_y), (valid_set_x, valid_set_y),
-            (test_set_x, test_set_y)]
+    rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
     return rval
 
 
@@ -158,24 +157,68 @@ def load_cifar10():
             test_labels.append(labels)
 
     # Split into 40000 train 10000 valid 10000 test
-    train_set_x = np.asarray(train_data)
-    train_set_y = np.asarray(train_labels)
-    test_set_x = np.asarray(test_data)
-    test_set_y = np.asarray(test_labels)
-    valid_set_x = train_set_x[-10000:]
-    valid_set_y = train_set_y[-10000:]
-    train_set_x = train_set_x[:-10000]
-    train_set_y = train_set_y[:-10000]
+    train_x = np.asarray(train_data)
+    train_y = np.asarray(train_labels)
+    test_x = np.asarray(test_data)
+    test_y = np.asarray(test_labels)
+    valid_x = train_x[-10000:]
+    valid_y = train_y[-10000:]
+    train_x = train_x[:-10000]
+    train_y = train_y[:-10000]
 
-    test_set_x = test_set_x.astype('float32')
-    test_set_y = test_set_y.astype('int32')
-    valid_set_x = valid_set_x.astype('float32')
-    valid_set_y = valid_set_y.astype('int32')
-    train_set_x = train_set_x.astype('float32')
-    train_set_y = train_set_y.astype('int32')
+    test_x = test_x.astype('float32')
+    test_y = test_y.astype('int32')
+    valid_x = valid_x.astype('float32')
+    valid_y = valid_y.astype('int32')
+    train_x = train_x.astype('float32')
+    train_y = train_y.astype('int32')
 
-    rval = [(train_set_x, train_set_y), (valid_set_x, valid_set_y),
-            (test_set_x, test_set_y)]
+    rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
+    return rval
+
+
+def load_scribe():
+    # Check if dataset is in the data directory.
+    data_path = os.path.join(os.path.split(__file__)[0], "data")
+    if not os.path.exists(data_path):
+        os.makedirs(data_path)
+
+    dataset = 'scribe.pkl'
+    data_file = os.path.join(data_path, dataset)
+    if os.path.isfile(data_file):
+        dataset = data_file
+
+    if (not os.path.isfile(data_file)):
+        try:
+            import urllib
+            urllib.urlretrieve('http://google.com')
+        except AttributeError:
+            import urllib.request as urllib
+            url = 'https://dl.dropboxusercontent.com/u/15378192/scribe.pkl'
+        print('Downloading data from %s' % url)
+        urllib.urlretrieve(url, data_file)
+
+    print('... loading data')
+    with open(data_file, 'rb') as pkl_file:
+        data = cPickle.load(pkl_file)
+
+    n_classes = data['nChars']
+    data_x, data_y = [], []
+    for x, y in zip(data['x'], data['y']):
+        # Need to make alternate characters blanks (index as nClasses)
+        y1 = [n_classes]
+        for char in y:
+            y1 += [char, n_classes]
+        data_y.append(np.asarray(y1, dtype=np.int32))
+        data_x.append(np.asarray(x, dtype=theano.config.floatX).T)
+
+    train_x = data_x[:750]
+    train_y = data_y[:750]
+    valid_x = data_x[750:900]
+    valid_y = data_y[750:900]
+    test_x = data_x[900:]
+    test_y = data_y[900:]
+    rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
     return rval
 
 
@@ -200,31 +243,45 @@ class BaseMinet(object):
 
 
 class TrainingMixin(object):
-    def get_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate):
+    def get_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate,
+                        momentum):
         """ Returns a simple sgd trainer."""
         gparams = T.grad(cost, params)
         updates = OrderedDict()
 
-        for param, gparam in zip(params, gparams):
-            updates[param] = param - learning_rate * gparam
+        if not hasattr(self, "momentum_velocity_"):
+            self.momentum_velocity_ = [0.] * len(gparams)
+
+        for n, (param, gparam) in enumerate(zip(params, gparams)):
+            velocity = self.momentum_velocity_[n]
+            update_step = momentum * velocity - learning_rate * gparam
+            self.momentum_velocity_[n] = update_step
+            updates[param] = param + update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
                                    updates=updates)
         return train_fn
 
-    def get_clip_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate):
+    def get_clip_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate,
+                             momentum):
         """ Returns a simple sgd trainer."""
         gparams = T.grad(cost, params)
         updates = OrderedDict()
+
+        if not hasattr(self, "momentum_velocity_"):
+            self.momentum_velocity_ = [0.] * len(gparams)
 
         # Gradient clipping
         grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(), gparams)))
         scaling_den = T.maximum(1., grad_norm)
         scaling_num = 1.
-        for param, gparam in zip(params, gparams):
-            updates[param] = param - learning_rate * gparam * (
+        for n, (param, gparam) in enumerate(zip(params, gparams)):
+            velocity = self.momentum_velocity_[n]
+            update_step = momentum * velocity - learning_rate * gparam * (
                 scaling_num / scaling_den)
+            self.momentum_velocity_[n] = update_step
+            updates[param] = param + update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
@@ -290,9 +347,9 @@ def softmax_cost(y_hat_sym, y_sym):
 
 class FeedforwardClassifier(BaseMinet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[500], batch_size=100, max_iter=1E3,
-                 learning_rate=0.01, learning_alg="sgd", activation="tanh",
-                 model_save_name="saved_model", save_frequency=100,
-                 random_seed=None):
+                 learning_rate=0.01, momentum=0., learning_alg="sgd",
+                 activation="tanh", model_save_name="saved_model",
+                 save_frequency=100, random_seed=None):
 
         if random_seed is None or type(random_seed) is int:
             self.random_state = np.random.RandomState(random_seed)
@@ -303,6 +360,7 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
         self.model_save_name = model_save_name
 
         self.learning_rate = learning_rate
+        self.momentum = momentum
         self.learning_alg = learning_alg
         if activation == "relu":
             self.feedforward_function = build_relu_layer
@@ -334,7 +392,8 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
 
         if self.learning_alg == "sgd":
             self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params, cost,
-                                                     self.learning_rate)
+                                                     self.learning_rate,
+                                                     self.momentum)
         else:
             raise ValueError("Algorithm %s is not "
                              "a valid argument for learning_alg!"
@@ -537,8 +596,7 @@ def ctc_cost(y_hat_sym, y_sym):
 
 def slab_print(slab):
     """
-    Prints a 'slab' of printed 'text' using ascii.
-    slab: A matrix of floats from [0, 1]
+    Prints a 'slab' of alignment using ascii.
 
     Originally from
     https://github.com/rakeshvar/rnn_ctc
@@ -578,7 +636,7 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
     CTC cost based on code by Shawn Tan.
     """
     def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
-                 learning_rate=0.01, learning_alg="sgd",
+                 learning_rate=0.01, momentum=0., learning_alg="sgd",
                  recurrent_activation="tanh", feedforward_activation="tanh",
                  save_frequency=10, model_save_name="saved_model",
                  random_seed=None):
@@ -586,6 +644,7 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
             self.random_state = np.random.RandomState(random_seed)
         self.learning_rate = learning_rate
         self.learning_alg = learning_alg
+        self.momentum = momentum
         self.hidden_layer_sizes = hidden_layer_sizes
         self.max_iter = int(max_iter)
         self.save_frequency = save_frequency
@@ -647,7 +706,8 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
         if self.learning_alg == "sgd":
             self.fit_function = self.get_clip_sgd_trainer(X_sym, y_sym, params,
                                                           cost,
-                                                          self.learning_rate)
+                                                          self.learning_rate,
+                                                          self.momentum)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
                              % self.learning_alg)
