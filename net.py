@@ -204,8 +204,27 @@ class TrainingMixin(object):
         """ Returns a simple sgd trainer."""
         gparams = T.grad(cost, params)
         updates = OrderedDict()
+
         for param, gparam in zip(params, gparams):
             updates[param] = param - learning_rate * gparam
+
+        train_fn = theano.function(inputs=[X_sym, y_sym],
+                                   outputs=cost,
+                                   updates=updates)
+        return train_fn
+
+    def get_clip_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate):
+        """ Returns a simple sgd trainer."""
+        gparams = T.grad(cost, params)
+        updates = OrderedDict()
+
+        # Gradient clipping
+        grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(), gparams)))
+        scaling_den = T.maximum(1., grad_norm)
+        scaling_num = 1.
+        for param, gparam in zip(params, gparams):
+            updates[param] = param - learning_rate * gparam * (
+                scaling_num / scaling_den)
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
@@ -626,8 +645,9 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
         self.params = params
 
         if self.learning_alg == "sgd":
-            self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params, cost,
-                                                     self.learning_rate)
+            self.fit_function = self.get_clip_sgd_trainer(X_sym, y_sym, params,
+                                                          cost,
+                                                          self.learning_rate)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
                              % self.learning_alg)
