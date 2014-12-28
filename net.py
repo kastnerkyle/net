@@ -245,7 +245,6 @@ class BaseMinet(object):
 class TrainingMixin(object):
     def get_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate,
                         momentum):
-        """ Returns a simple sgd trainer."""
         gparams = T.grad(cost, params)
         updates = OrderedDict()
 
@@ -265,7 +264,6 @@ class TrainingMixin(object):
 
     def get_clip_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate,
                              momentum):
-        """ Returns a simple sgd trainer."""
         gparams = T.grad(cost, params)
         updates = OrderedDict()
 
@@ -282,6 +280,53 @@ class TrainingMixin(object):
                 scaling_num / scaling_den)
             self.momentum_velocity_[n] = update_step
             updates[param] = param + update_step
+
+        train_fn = theano.function(inputs=[X_sym, y_sym],
+                                   outputs=cost,
+                                   updates=updates)
+        return train_fn
+
+    def get_clip_rmsprop_trainer(self, X_sym, y_sym, params, cost,
+                                 learning_rate, momentum):
+        gparams = T.grad(cost, params)
+        updates = OrderedDict()
+
+        if not hasattr(self, "running_average_"):
+            self.running_square_ = [0.] * len(gparams)
+            self.running_avg_ = [0.] * len(gparams)
+            self.updates_storage_ = [0.] * len(gparams)
+
+        if not hasattr(self, "momentum_velocity_"):
+            self.momentum_velocity_ = [0.] * len(gparams)
+
+        for n, (param, gparam) in enumerate(zip(params, gparams)):
+            combination_coeff = 0.9
+            minimum_grad = 1e-4
+            old_square = self.running_square_[n]
+            new_square = combination_coeff * old_square + (
+                1. - combination_coeff) * T.sqr(gparam)
+            old_avg = self.running_avg_[n]
+            new_avg = combination_coeff * old_avg + (
+                1. - combination_coeff) * gparam
+            rms_grad = T.sqrt(new_square - new_avg ** 2)
+            rms_grad = T.maximum(rms_grad, minimum_grad)
+            velocity = self.momentum_velocity_[n]
+            update_step = momentum * velocity - learning_rate * (
+                gparam / rms_grad)
+            self.running_square_[n] = new_square
+            self.running_avg_[n] = new_avg
+            self.updates_storage_[n] = update_step
+
+        # Clipping after calculation of updates and momentum
+        clipping_threshold = 1.
+        grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(),
+                                   self.updates_storage_)))
+        scaling_den = T.maximum(clipping_threshold, grad_norm)
+        scaling_num = clipping_threshold
+        for n, param in enumerate(params):
+            update_step = self.updates_storage_[n] * (scaling_num / scaling_den)
+            updates[param] = param + update_step
+            self.momentum_velocity_[n] = update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
@@ -388,7 +433,7 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
         y_hat_sym = T.nnet.softmax(output_variable)
         cost = softmax_cost(y_hat_sym, y_sym)
 
-        self.params = params
+        self.params_ = params
 
         if self.learning_alg == "sgd":
             self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params, cost,
@@ -460,8 +505,7 @@ class FeedforwardClassifier(BaseMinet, TrainingMixin):
         return np.argmax(self.predict_function(X), axis=1)
 
 
-def build_recurrent_tanh_layer(input_size, hidden_size, output_size,
-                               input_variable, random_state):
+def _recurrent_tanh_init(input_size, hidden_size, output_size, random_state):
     wih = shared_rand((input_size, hidden_size), random_state)
     whh = shared_ortho((hidden_size, hidden_size), random_state)
     who = shared_rand((hidden_size, output_size), random_state)
@@ -474,16 +518,23 @@ def build_recurrent_tanh_layer(input_size, hidden_size, output_size,
         h_t = T.tanh(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
         return h_t
 
+    return step, params, [h0]
+
+
+def build_recurrent_tanh_layer(input_size, hidden_size, output_size,
+                               input_variable, random_state):
+    step, params, outputs = _recurrent_tanh_init(input_size, hidden_size,
+                                                 output_size, random_state)
+
     hidden, _ = theano.scan(
         step,
         sequences=[input_variable],
-        outputs_info=[h0]
+        outputs_info=outputs
     )
     return hidden, params
 
 
-def build_recurrent_relu_layer(input_size, hidden_size, output_size,
-                               input_variable, random_state):
+def _recurrent_relu_init(input_size, hidden_size, output_size, random_state):
     wih = shared_rand((input_size, hidden_size), random_state)
     whh = shared_ortho((hidden_size, hidden_size), random_state)
     who = shared_rand((hidden_size, output_size), random_state)
@@ -496,16 +547,23 @@ def build_recurrent_relu_layer(input_size, hidden_size, output_size,
         h_t = clip_relu(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
         return h_t
 
+    return step, params, [h0]
+
+
+def build_recurrent_relu_layer(input_size, hidden_size, output_size,
+                               input_variable, random_state):
+
+    step, params, outputs = _recurrent_relu_init(input_size, hidden_size,
+                                                 output_size, random_state)
     hidden, _ = theano.scan(
         step,
         sequences=[input_variable],
-        outputs_info=[h0]
+        outputs_info=outputs
     )
     return hidden, params
 
 
-def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
-                               input_variable, random_state):
+def _recurrent_lstm_init(input_size, hidden_size, output_size, random_state):
     h0 = shared_zeros((hidden_size,))
     c0 = shared_zeros((hidden_size,))
     who = shared_rand((hidden_size, output_size), random_state)
@@ -560,10 +618,17 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
         h_t = o_t * T.tanh(c_t)
         return h_t, c_t
 
+    return step, params, [h0, c0]
+
+
+def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
+                               input_variable, random_state):
+    step, params, outputs = _recurrent_lstm_init(input_size, hidden_size,
+                                                 output_size, random_state)
     [hidden, cell], _ = theano.scan(step,
                                     sequences=[input_variable],
-                                    outputs_info=[h0, c0])
-    return hidden, cell, params
+                                    outputs_info=outputs)
+    return hidden, params
 
 
 def recurrence_relation(size):
@@ -638,13 +703,14 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
                  recurrent_activation="tanh", feedforward_activation="tanh",
-                 save_frequency=10, model_save_name="saved_model",
-                 random_seed=None):
+                 bidirectional=False, save_frequency=10,
+                 model_save_name="saved_model", random_seed=None):
         if random_seed is None or type(random_seed) is int:
             self.random_state = np.random.RandomState(random_seed)
         self.learning_rate = learning_rate
         self.learning_alg = learning_alg
         self.momentum = momentum
+        self.bidirectional = bidirectional
         self.hidden_layer_sizes = hidden_layer_sizes
         self.max_iter = int(max_iter)
         self.save_frequency = save_frequency
@@ -659,6 +725,7 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
         else:
             raise ValueError("Value %s not understood for recurrent_activation"
                              % recurrent_activation)
+
         if feedforward_activation == "tanh":
             self.feedforward_activation = T.tanh
         elif feedforward_activation == "relu":
@@ -680,14 +747,9 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
         for i in range(0, len(layer_sizes) - 2, 2):
             current_layers = layer_sizes[i:i+3]
             input_size, hidden_size, output_size = current_layers
-            if self.recurrent_activation != "lstm":
-                hidden, params = self.recurrent_function(
-                    input_size, hidden_size, output_size, input_variable,
-                    self.random_state)
-            else:
-                hidden, cell, params = self.recurrent_function(
-                    input_size, hidden_size, output_size, input_variable,
-                    self.random_state)
+            hidden, params = self.recurrent_function(
+                input_size, hidden_size, output_size, input_variable,
+                self.random_state)
 
             Wo = params[-2]
             bo = params[-1]
@@ -701,13 +763,14 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
         y_hat_sym = T.nnet.softmax(input_variable)
         cost = ctc_cost(y_hat_sym, y_sym)
 
-        self.params = params
+        self.params_ = params
 
         if self.learning_alg == "sgd":
-            self.fit_function = self.get_clip_sgd_trainer(X_sym, y_sym, params,
-                                                          cost,
-                                                          self.learning_rate,
-                                                          self.momentum)
+            self.fit_function = self.get_clip_sgd_trainer(
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
+        elif self.learning_alg == "rmsprop":
+            self.fit_function = self.get_clip_rmsprop_trainer(
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
                              % self.learning_alg)
