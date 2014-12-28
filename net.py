@@ -14,7 +14,6 @@ import theano
 import theano.tensor as T
 from theano.compat.python2x import OrderedDict
 import warnings
-import sys
 # Sandbox?
 from theano.tensor.shared_randomstreams import RandomStreams
 
@@ -286,53 +285,6 @@ class TrainingMixin(object):
                                    updates=updates)
         return train_fn
 
-    def get_clip_rmsprop_trainer(self, X_sym, y_sym, params, cost,
-                                 learning_rate, momentum):
-        gparams = T.grad(cost, params)
-        updates = OrderedDict()
-
-        if not hasattr(self, "running_average_"):
-            self.running_square_ = [0.] * len(gparams)
-            self.running_avg_ = [0.] * len(gparams)
-            self.updates_storage_ = [0.] * len(gparams)
-
-        if not hasattr(self, "momentum_velocity_"):
-            self.momentum_velocity_ = [0.] * len(gparams)
-
-        for n, (param, gparam) in enumerate(zip(params, gparams)):
-            combination_coeff = 0.9
-            minimum_grad = 1e-4
-            old_square = self.running_square_[n]
-            new_square = combination_coeff * old_square + (
-                1. - combination_coeff) * T.sqr(gparam)
-            old_avg = self.running_avg_[n]
-            new_avg = combination_coeff * old_avg + (
-                1. - combination_coeff) * gparam
-            rms_grad = T.sqrt(new_square - new_avg ** 2)
-            rms_grad = T.maximum(rms_grad, minimum_grad)
-            velocity = self.momentum_velocity_[n]
-            update_step = momentum * velocity - learning_rate * (
-                gparam / rms_grad)
-            self.running_square_[n] = new_square
-            self.running_avg_[n] = new_avg
-            self.updates_storage_[n] = update_step
-
-        # Clipping after calculation of updates and momentum
-        clipping_threshold = 1.
-        grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(),
-                                   self.updates_storage_)))
-        scaling_den = T.maximum(clipping_threshold, grad_norm)
-        scaling_num = clipping_threshold
-        for n, param in enumerate(params):
-            update_step = self.updates_storage_[n] * (scaling_num / scaling_den)
-            updates[param] = param + update_step
-            self.momentum_velocity_[n] = update_step
-
-        train_fn = theano.function(inputs=[X_sym, y_sym],
-                                   outputs=cost,
-                                   updates=updates)
-        return train_fn
-
 
 def build_linear_layer(input_size, output_size, input_variable, random_state):
     W_values = np.asarray(random_state.uniform(
@@ -390,7 +342,7 @@ def softmax_cost(y_hat_sym, y_sym):
     return -T.mean(T.log(y_hat_sym)[T.arange(y_sym.shape[0]), y_sym])
 
 
-class FeedforwardClassifier(BaseMinet, TrainingMixin):
+class FeedforwardNetwork(BaseMinet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[500], batch_size=100, max_iter=1E3,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
                  activation="tanh", model_save_name="saved_model",
@@ -632,11 +584,17 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
 
 
 def recurrence_relation(size):
+    """
+    Based on code from Shawn Tan
+    """
     eye2 = T.eye(size + 2)
     return T.eye(size) + eye2[2:, 1:-1] + eye2[2:, :-2] * (T.arange(size) % 2)
 
 
 def path_probs(predict, y_sym):
+    """
+    Based on code from Shawn Tan
+    """
     pred_y = predict[:, y_sym]
     rr = recurrence_relation(y_sym.shape[0])
 
@@ -652,6 +610,9 @@ def path_probs(predict, y_sym):
 
 
 def ctc_cost(y_hat_sym, y_sym):
+    """
+    Based on code from Shawn Tan
+    """
     forward_probs = path_probs(y_hat_sym, y_sym)
     backward_probs = path_probs(y_hat_sym[::-1], y_sym[::-1])[::-1, ::-1]
     probs = forward_probs * backward_probs / y_hat_sym[:, y_sym]
@@ -659,32 +620,7 @@ def ctc_cost(y_hat_sym, y_sym):
     return -T.log(total_probs)
 
 
-def slab_print(slab):
-    """
-    Prints a 'slab' of alignment using ascii.
-
-    Originally from
-    https://github.com/rakeshvar/rnn_ctc
-    """
-    for ir, r in enumerate(slab):
-        sys.stdout.write('{:2d}|'.format(ir))
-        for val in r:
-            if val == 0:
-                sys.stdout.write(' ')
-            elif val < .25:
-                sys.stdout.write('░')
-            elif val < .5:
-                sys.stdout.write('▒')
-            elif val < .75:
-                sys.stdout.write('▓')
-            elif val < 1.0:
-                sys.stdout.write('█')
-            else:
-                sys.stdout.write('█')
-        print('|')
-
-
-def rnn_check_array(X):
+def rnn_check_array(X, y=None):
     if type(X) == np.ndarray and len(X.shape) == 2:
         return [X]
     elif type(X) == np.ndarray and len(X.shape) == 3:
@@ -696,14 +632,14 @@ def rnn_check_array(X):
     return X
 
 
-class RecurrentCTC(BaseMinet, TrainingMixin):
+class RecurrentNetwork(BaseMinet, TrainingMixin):
     """
     CTC cost based on code by Shawn Tan.
     """
     def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
                  recurrent_activation="tanh", feedforward_activation="tanh",
-                 bidirectional=False, save_frequency=10,
+                 bidirectional=False, cost="ctc", save_frequency=10,
                  model_save_name="saved_model", random_seed=None):
         if random_seed is None or type(random_seed) is int:
             self.random_state = np.random.RandomState(random_seed)
@@ -711,6 +647,7 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
         self.learning_alg = learning_alg
         self.momentum = momentum
         self.bidirectional = bidirectional
+        self.cost = cost
         self.hidden_layer_sizes = hidden_layer_sizes
         self.max_iter = int(max_iter)
         self.save_frequency = save_frequency
@@ -732,7 +669,7 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
             self.feedforward_activation = relu
         else:
             raise ValueError("Value %s not understood" % feedforward_activation,
-                             "for feedforward_activation")
+                             "for feedfirward_activation")
 
     def _setup_functions(self, X_sym, y_sym, layer_sizes):
         input_variable = X_sym
@@ -760,16 +697,17 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
                 input_variable = self.feedforward_activation(
                     T.dot(hidden, Wo) + bo)
 
-        y_hat_sym = T.nnet.softmax(input_variable)
-        cost = ctc_cost(y_hat_sym, y_sym)
+        if self.cost == "ctc":
+            y_hat_sym = T.nnet.softmax(input_variable)
+            cost = ctc_cost(y_hat_sym, y_sym)
+        elif self.cost == "softmax":
+            y_hat_sym = T.nnet.softmax(input_variable)
+            cost = softmax_cost(y_hat_sym, y_sym)
 
         self.params_ = params
 
         if self.learning_alg == "sgd":
             self.fit_function = self.get_clip_sgd_trainer(
-                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
-        elif self.learning_alg == "rmsprop":
-            self.fit_function = self.get_clip_rmsprop_trainer(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
@@ -829,29 +767,27 @@ class RecurrentCTC(BaseMinet, TrainingMixin):
 
     def predict(self, X):
         X = rnn_check_array(X)
-        blank_pred = self.layer_sizes_[-1] - 1
         predictions = []
-        for n in range(len(X)):
-            pred = np.argmax(self.predict_function(X[n])[0], axis=1)
-            out = []
-            for n, p in enumerate(pred):
-                if (p != blank_pred) and (n == 0 or p != pred[n-1]):
-                    out.append(p)
-            predictions.append(np.array(out))
-        return predictions
+        if self.cost == "ctc":
+            blank_pred = self.layer_sizes_[-1] - 1
+            for n in range(len(X)):
+                pred = np.argmax(self.predict_function(X[n])[0], axis=1)
+                out = []
+                for n, p in enumerate(pred):
+                    if (p != blank_pred) and (n == 0 or p != pred[n-1]):
+                        out.append(p)
+                predictions.append(np.array(out))
+            return predictions
+        elif self.cost == "softmax":
+            for n in range(len(X)):
+                pred = np.argmax(self.predict_function(X[n])[0], axis=1)
+                predictions.append(pred)
+            return predictions
 
     def predict_proba(self, X):
         X = rnn_check_array(X)
         predictions = []
         for n in range(len(X)):
-            pred = self.predict_function(X[n])
+            pred = self.predict_function(X[n])[0]
             predictions.append(pred)
         return predictions
-
-    def print_alignment(self, X):
-        X = rnn_check_array(X)
-        for n in range(len(X)):
-            print("Alignment for sample %d" % n)
-            pred = self.predict_function(X[n])[0]
-            slab_print(X[n].T)
-            slab_print(pred.T[:-1])
