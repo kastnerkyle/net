@@ -460,11 +460,9 @@ class FeedforwardNetwork(BaseMinet, TrainingMixin):
 def _recurrent_tanh_init(input_size, hidden_size, output_size, random_state):
     wih = shared_rand((input_size, hidden_size), random_state)
     whh = shared_ortho((hidden_size, hidden_size), random_state)
-    who = shared_rand((hidden_size, output_size), random_state)
     bh = shared_zeros((hidden_size,))
     h0 = shared_zeros((hidden_size,))
-    bo = shared_zeros((output_size,))
-    params = [wih, bh, whh, h0, who, bo]
+    params = [wih, bh, whh, h0]
 
     def step(x_t, h_tm1):
         h_t = T.tanh(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
@@ -489,11 +487,9 @@ def build_recurrent_tanh_layer(input_size, hidden_size, output_size,
 def _recurrent_relu_init(input_size, hidden_size, output_size, random_state):
     wih = shared_rand((input_size, hidden_size), random_state)
     whh = shared_ortho((hidden_size, hidden_size), random_state)
-    who = shared_rand((hidden_size, output_size), random_state)
     bh = shared_zeros((hidden_size,))
     h0 = shared_zeros((hidden_size,))
-    bo = shared_zeros((output_size,))
-    params = [wih, bh, whh, h0, who, bo]
+    params = [wih, bh, whh, h0]
 
     def step(x_t, h_tm1):
         h_t = clip_relu(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
@@ -518,8 +514,6 @@ def build_recurrent_relu_layer(input_size, hidden_size, output_size,
 def _recurrent_lstm_init(input_size, hidden_size, output_size, random_state):
     h0 = shared_zeros((hidden_size,))
     c0 = shared_zeros((hidden_size,))
-    who = shared_rand((hidden_size, output_size), random_state)
-    bo = shared_zeros((output_size,))
 
     # Input gate weights
     wxig = shared_rand((hidden_size, input_size), random_state)
@@ -556,7 +550,7 @@ def _recurrent_lstm_init(input_size, hidden_size, output_size, random_state):
               wxfg, whfg, wcfg,
               wxog, whog, wcog,
               wxc, whc, big, bfg, bog, bc,
-              h0, c0, who, bo]
+              h0, c0]
 
     def step(x_t, h_tm1, c_tm1):
         i_t = T.nnet.sigmoid(T.dot(wxig, x_t) + T.dot(whig, h_tm1) +
@@ -684,18 +678,34 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         for i in range(0, len(layer_sizes) - 2, 2):
             current_layers = layer_sizes[i:i+3]
             input_size, hidden_size, output_size = current_layers
-            hidden, params = self.recurrent_function(
+
+            forward_hidden, forward_params = self.recurrent_function(
                 input_size, hidden_size, output_size, input_variable,
                 self.random_state)
 
-            Wo = params[-2]
-            bo = params[-1]
-            # Need last activation to be linear for CTC cost
-            if i == (len(layer_sizes) - 3):
-                input_variable = T.dot(hidden, Wo) + bo
+            if self.bidirectional:
+                backward_hidden, backward_params = self.recurrent_function(
+                    input_size, hidden_size, output_size, input_variable[::-1],
+                    self.random_state)
+                Wfo = shared_rand((hidden_size, output_size), self.random_state)
+                Wbo = shared_rand((hidden_size, output_size), self.random_state)
+                by = shared_zeros((output_size,))
+                params = forward_params + backward_params + [Wfo, Wbo, by]
+
+                input_variable = T.dot(forward_hidden, Wfo) + T.dot(
+                    backward_hidden, Wbo) + by
+                # Linear activation before softmax
+                if i != (len(layer_sizes) - 3):
+                    input_variable = self.feedforward_activation(input_variable)
             else:
-                input_variable = self.feedforward_activation(
-                    T.dot(hidden, Wo) + bo)
+                Wo = shared_rand((hidden_size, output_size), self.random_state)
+                bo = shared_zeros((output_size,))
+                params = forward_params + [Wo, bo]
+
+                input_variable = T.dot(forward_hidden, Wo) + bo
+                # Linear activation before softmax
+                if i != (len(layer_sizes) - 3):
+                    input_variable = self.feedforward_activation(input_variable)
 
         if self.cost == "ctc":
             y_hat_sym = T.nnet.softmax(input_variable)

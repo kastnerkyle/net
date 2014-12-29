@@ -21,7 +21,7 @@ targets[:, 2:][seq[:, 1:-1, 1] > seq[:, :-2, 0] + thresh] = 1
 targets[:, 2:][seq[:, 1:-1, 1] < seq[:, :-2, 0] - thresh] = 2
 
 clf = RecurrentNetwork(learning_alg="sgd", hidden_layer_sizes=[n_h],
-                       max_iter=500, cost="softmax", learning_rate=0.01,
+                       max_iter=1E3, cost="softmax", learning_rate=0.1,
                        momentum=0.99, recurrent_activation="lstm",
                        random_seed=1999)
 
