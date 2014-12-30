@@ -9,12 +9,14 @@ import tempfile
 import os
 import numpy as np
 from scipy import linalg
+from scipy.io import wavfile
 import glob
 import theano
 import theano.tensor as T
 from theano.compat.python2x import OrderedDict
 import warnings
 # Sandbox?
+import fnmatch
 from theano.tensor.shared_randomstreams import RandomStreams
 
 
@@ -221,6 +223,77 @@ def load_scribe():
     return rval
 
 
+def load_librispeech():
+    # Check if dataset is in the data directory.
+    data_path = os.path.join(os.path.split(__file__)[0], "data")
+    if not os.path.exists(data_path):
+        os.makedirs(data_path)
+
+    dataset = 'dev-clean.tar.gz'
+    data_file = os.path.join(data_path, dataset)
+    if os.path.isfile(data_file):
+        dataset = data_file
+
+    if (not os.path.isfile(data_file)):
+        try:
+            import urllib
+            urllib.urlretrieve('http://google.com')
+        except AttributeError:
+            import urllib.request as urllib
+            url = 'http://www.openslr.org/resources/12/dev-clean.tar.gz'
+        print('Downloading data from %s' % url)
+        urllib.urlretrieve(url, data_file)
+
+    print('... loading data')
+    if not os.path.exists(os.path.join(data_path, "LibriSpeech", "dev-clean")):
+        tar = tarfile.open(data_file)
+        os.chdir(data_path)
+        tar.extractall()
+        tar.close()
+
+    data_path = os.path.join(data_path, "LibriSpeech", "dev-clean")
+
+    audio_matches = []
+    for root, dirnames, filenames in os.walk(data_path):
+        for filename in fnmatch.filter(filenames, '*.flac'):
+            audio_matches.append(os.path.join(root, filename))
+
+    text_matches = []
+    for root, dirnames, filenames in os.walk(data_path):
+        for filename in fnmatch.filter(filenames, '*.txt'):
+            text_matches.append(os.path.join(root, filename))
+
+    data_x = []
+    data_y = []
+    for full_t in text_matches:
+        f = open(full_t, 'r')
+        for line in f.readlines():
+            word_splits = line.strip().split(" ")
+            file_tag = word_splits[0]
+            words = word_splits[1:]
+            audio_path = [a for a in audio_matches if file_tag in a]
+            if len(audio_path) != 1:
+                raise ValueError("More than one match for tag %s!" % file_tag)
+            if not os.path.exists(audio_path[0][:-5] + ".wav"):
+                r = os.system("ffmpeg -i %s %s.wav" % (audio_path[0],
+                                                       audio_path[0][:-5]))
+                if r:
+                    raise ValueError("A problem occured converting file to wav"
+                                     "Make sure ffmpeg is installed")
+            wav_path = audio_path[0][:-5] + '.wav'
+            fs, d = wavfile.read(wav_path)
+        f.close()
+    from IPython import embed; embed()
+    raise ValueError()
+
+    train_x = data_x[:750]
+    train_y = data_y[:750]
+    valid_x = data_x[750:900]
+    valid_y = data_y[750:900]
+    test_x = data_x[900:]
+    test_y = data_y[900:]
+    rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
+    return rval
 class BaseMinet(object):
     def __getstate__(self):
         if not hasattr(self, '_pickle_skip_list'):

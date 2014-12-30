@@ -8,11 +8,13 @@ clf = RecurrentNetwork(learning_alg="sgd", hidden_layer_sizes=[9], max_iter=100,
                        random_seed=1999)
 clf.fit(train_x, train_y)
 
+fig = plt.figure()
+ax1 = plt.subplot(211)
 plt.imshow(train_x[0].T, interpolation='nearest', cmap='gray')
-plt.title("Ground truth alignment")
-plt.figure()
+plt.title("Ground truth")
 y_pred = clf.predict_proba(train_x[0])
+ax2 = plt.subplot(212)
 # Ignore "blanks"
 plt.imshow(y_pred[0].T[:-1], interpolation='nearest', cmap='gray')
-plt.title("Estimated alignment")
+plt.title("Estimated")
 plt.show()
