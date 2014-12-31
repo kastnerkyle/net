@@ -858,7 +858,11 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
     def fit(self, X, y, valid_X=None, valid_y=None):
         X = rnn_check_array(X)
         input_size = X[0].shape[1]
-        output_size = np.max([len(np.unique(d)) for d in y])
+        # Assume that class values are sequential
+        highest_class = np.max([np.max(d) for d in y])
+        lowest_class = np.min([np.min(d) for d in y])
+        # +1 to include endpoint
+        output_size = len(np.arange(lowest_class, highest_class + 1))
         X_sym = T.matrix('x')
         y_sym = T.ivector('y')
         self.layers_ = []
