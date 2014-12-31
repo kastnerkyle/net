@@ -10,10 +10,13 @@ import os
 import numpy as np
 from scipy import linalg
 from scipy.io import wavfile
+import tables
+import numbers
 import glob
 import theano
 import theano.tensor as T
 from theano.compat.python2x import OrderedDict
+import matplotlib.pyplot as plt
 import warnings
 # Sandbox?
 import fnmatch
@@ -223,6 +226,12 @@ def load_scribe():
     return rval
 
 
+# A tricky trick for monkeypatching an instancemethod that is
+# CPython :( there must be a better way
+class _cVLArray(tables.VLArray):
+    pass
+
+
 def load_librispeech():
     # Check if dataset is in the data directory.
     data_path = os.path.join(os.path.split(__file__)[0], "data")
@@ -234,7 +243,7 @@ def load_librispeech():
     if os.path.isfile(data_file):
         dataset = data_file
 
-    if (not os.path.isfile(data_file)):
+    if not os.path.isfile(data_file):
         try:
             import urllib
             urllib.urlretrieve('http://google.com')
@@ -251,49 +260,92 @@ def load_librispeech():
         tar.extractall()
         tar.close()
 
-    data_path = os.path.join(data_path, "LibriSpeech", "dev-clean")
+    h5_file_path = os.path.join(data_path, "saved_libri.h5")
+    if not os.path.exists(h5_file_path):
+        data_path = os.path.join(data_path, "LibriSpeech", "dev-clean")
 
-    audio_matches = []
-    for root, dirnames, filenames in os.walk(data_path):
-        for filename in fnmatch.filter(filenames, '*.flac'):
-            audio_matches.append(os.path.join(root, filename))
+        audio_matches = []
+        for root, dirnames, filenames in os.walk(data_path):
+            for filename in fnmatch.filter(filenames, '*.flac'):
+                audio_matches.append(os.path.join(root, filename))
 
-    text_matches = []
-    for root, dirnames, filenames in os.walk(data_path):
-        for filename in fnmatch.filter(filenames, '*.txt'):
-            text_matches.append(os.path.join(root, filename))
+        text_matches = []
+        for root, dirnames, filenames in os.walk(data_path):
+            for filename in fnmatch.filter(filenames, '*.txt'):
+                text_matches.append(os.path.join(root, filename))
 
-    data_x = []
-    data_y = []
-    for full_t in text_matches:
-        f = open(full_t, 'r')
-        for line in f.readlines():
-            word_splits = line.strip().split(" ")
-            file_tag = word_splits[0]
-            words = word_splits[1:]
-            audio_path = [a for a in audio_matches if file_tag in a]
-            if len(audio_path) != 1:
-                raise ValueError("More than one match for tag %s!" % file_tag)
-            if not os.path.exists(audio_path[0][:-5] + ".wav"):
-                r = os.system("ffmpeg -i %s %s.wav" % (audio_path[0],
-                                                       audio_path[0][:-5]))
-                if r:
-                    raise ValueError("A problem occured converting file to wav"
-                                     "Make sure ffmpeg is installed")
-            wav_path = audio_path[0][:-5] + '.wav'
-            fs, d = wavfile.read(wav_path)
-        f.close()
-    from IPython import embed; embed()
-    raise ValueError()
+        # http://mail.scipy.org/pipermail/numpy-discussion/2011-March/055219.html
+        h5_file = tables.openFile(h5_file_path, mode='w')
+        data_x = h5_file.createVLArray(h5_file.root, 'data_x',
+                                       tables.Float32Atom(shape=()),
+                                       filters=tables.Filters(1))
+        data_x_shapes = h5_file.createVLArray(h5_file.root, 'data_x_shapes',
+                                              tables.Int32Atom(shape=()),
+                                              filters=tables.Filters(1))
+        data_y = h5_file.createVLArray(h5_file.root, 'data_y',
+                                       tables.Int32Atom(shape=()),
+                                       filters=tables.Filters(1))
+        for full_t in text_matches:
+            f = open(full_t, 'r')
+            for line in f.readlines():
+                word_splits = line.strip().split(" ")
+                file_tag = word_splits[0]
+                words = word_splits[1:]
+                # Convert chars to int classes
+                chars = [ord(c) - 96 for c in (" ").join(words).lower()]
+                # Make spaces class 0
+                chars = [c if c > 0 else 0 for c in chars]
+                data_y.append(np.array(chars, dtype='int32'))
+                audio_path = [a for a in audio_matches if file_tag in a]
+                if len(audio_path) != 1:
+                    raise ValueError("More than one match for tag %s!" % file_tag)
+                if not os.path.exists(audio_path[0][:-5] + ".wav"):
+                    r = os.system("ffmpeg -i %s %s.wav" % (audio_path[0],
+                                                           audio_path[0][:-5]))
+                    if r:
+                        raise ValueError("A problem occured converting flac to"
+                                         "wav, make sure ffmpeg is installed")
+                wav_path = audio_path[0][:-5] + '.wav'
+                fs, d = wavfile.read(wav_path)
+                Pxx, _, _, _ = plt.specgram(d, NFFT=256, noverlap=128)
+                data_x_shapes.append(np.array(Pxx.T.shape, dtype='int32'))
+                data_x.append(Pxx.T.astype('float32').flatten())
+            f.close()
+        h5_file.close()
 
-    train_x = data_x[:750]
-    train_y = data_y[:750]
-    valid_x = data_x[750:900]
-    valid_y = data_y[750:900]
-    test_x = data_x[900:]
-    test_y = data_y[900:]
+    h5_file = tables.openFile(h5_file_path, mode='r')
+    data_x = h5_file.root.data_x
+    data_x_shapes = h5_file.root.data_x_shapes
+    data_y = h5_file.root.data_y
+    # A dirty hack to only monkeypatch data_x
+    data_x.__class__ = _cVLArray
+
+    # override getter so that it gets reshaped to 2D when fetched
+    old_getter = data_x.__getitem__
+
+    def getter(self, key):
+        if isinstance(key, numbers.Integral) or isinstance(key, np.integer):
+            return old_getter(key).reshape(data_x_shapes[key])
+        elif isinstance(key, slice):
+            start, stop, step = self._processRange(key.start, key.stop,
+                                                   key.step)
+            return [o.reshape(s) for o, s in zip(
+                self.read(start, stop, step), data_x_shapes[slice(
+                    start, stop, step)])]
+
+    # Patch __getitem__ in custom subclass, applying to all instances of it
+    _cVLArray.__getitem__ = getter
+
+    train_x = data_x[:2000]
+    train_y = data_y[:2000]
+    valid_x = data_x[2000:2500]
+    valid_y = data_y[2000:2500]
+    test_x = data_x[2500:]
+    test_y = data_y[2500:]
     rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
     return rval
+
+
 class BaseMinet(object):
     def __getstate__(self):
         if not hasattr(self, '_pickle_skip_list'):
