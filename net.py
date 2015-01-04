@@ -1,4 +1,5 @@
 # -*- coding: utf 8 -*-
+from __future__ import division
 try:
     import cPickle
 except ImportError:
@@ -206,8 +207,13 @@ def load_scribe():
     with open(data_file, 'rb') as pkl_file:
         data = cPickle.load(pkl_file)
 
-    n_classes = data['nChars']
     data_x, data_y = [], []
+    for x, y in zip(data['x'], data['y']):
+        data_y.append(np.asarray(y, dtype=np.int32))
+        data_x.append(np.asarray(x, dtype=theano.config.floatX).T)
+    """
+    Original
+    n_classes = data['nChars']
     for x, y in zip(data['x'], data['y']):
         # Need to make alternate characters blanks (index as nClasses)
         y1 = [n_classes]
@@ -215,6 +221,7 @@ def load_scribe():
             y1 += [char, n_classes]
         data_y.append(np.asarray(y1, dtype=np.int32))
         data_x.append(np.asarray(x, dtype=theano.config.floatX).T)
+    """
 
     train_x = data_x[:750]
     train_y = data_y[:750]
@@ -292,9 +299,9 @@ def load_librispeech():
                 file_tag = word_splits[0]
                 words = word_splits[1:]
                 # Convert chars to int classes
-                chars = [ord(c) - 96 for c in (" ").join(words).lower()]
-                # Make spaces class 0
-                chars = [c if c > 0 else 0 for c in chars]
+                chars = [ord(c) - 97 for c in (" ").join(words).lower()]
+                # Make spaces last class
+                chars = [c if c >= 0 else 26 for c in chars]
                 data_y.append(np.array(chars, dtype='int32'))
                 audio_path = [a for a in audio_matches if file_tag in a]
                 if len(audio_path) != 1:
@@ -307,6 +314,8 @@ def load_librispeech():
                                          "wav, make sure ffmpeg is installed")
                 wav_path = audio_path[0][:-5] + '.wav'
                 fs, d = wavfile.read(wav_path)
+                # Preprocessing from A. Graves "Towards End-to-End Speech
+                # Recognition"
                 Pxx, _, _, _ = plt.specgram(d, NFFT=256, noverlap=128)
                 data_x_shapes.append(np.array(Pxx.T.shape, dtype='int32'))
                 data_x.append(Pxx.T.astype('float32').flatten())
@@ -400,8 +409,8 @@ class TrainingMixin(object):
         scaling_num = 1.
         for n, (param, gparam) in enumerate(zip(params, gparams)):
             velocity = self.momentum_velocity_[n]
-            update_step = momentum * velocity - learning_rate * gparam * (
-                scaling_num / scaling_den)
+            update_step = momentum * velocity - learning_rate * gparam
+            update_step *= (scaling_num / scaling_den)
             self.momentum_velocity_[n] = update_step
             updates[param] = param + update_step
 
@@ -728,6 +737,28 @@ def path_probs(predict, y_sym):
     return probabilities
 
 
+def _epslog(X):
+    return T.log(X + 1E-22)
+
+
+def log_path_probs(y_hat_sym, y_sym):
+    """
+    Based on code from Shawn Tan with calculations in log space
+    """
+    pred_y = y_hat_sym[:, y_sym]
+    rr = recurrence_relation(y_sym.shape[0])
+
+    def step(logp_curr, logp_prev):
+        return logp_curr + _epslog(T.dot(T.exp(logp_prev), rr))
+
+    log_probs, _ = theano.scan(
+        step,
+        sequences=[_epslog(pred_y)],
+        outputs_info=[_epslog(T.eye(y_sym.shape[0])[0])]
+    )
+    return log_probs
+
+
 def ctc_cost(y_hat_sym, y_sym):
     """
     Based on code from Shawn Tan
@@ -737,6 +768,33 @@ def ctc_cost(y_hat_sym, y_sym):
     probs = forward_probs * backward_probs / y_hat_sym[:, y_sym]
     total_probs = T.sum(probs)
     return -T.log(total_probs)
+
+
+def log_ctc_cost(y_hat_sym, y_sym):
+    """
+    Based on code from Shawn Tan with sum calculations in log space
+    """
+    #forward_probs = path_probs(y_hat_sym, y_sym)
+    #backward_probs = path_probs(y_hat_sym[::-1], y_sym[::-1])[::-1, ::-1]
+    #log_probs = epslog(forward_probs) + epslog(backward_probs) - epslog(
+    #    y_hat_sym[:, y_sym])
+    log_forward_probs = log_path_probs(y_hat_sym, y_sym)
+    log_backward_probs = log_path_probs(
+        y_hat_sym[::-1], y_sym[::-1])[::-1, ::-1]
+    log_probs = log_forward_probs + log_backward_probs - _epslog(
+        y_hat_sym[:, y_sym])
+
+    def logadd(log_a, log_b):
+        return log_a + T.log(1. + T.exp(log_b - log_a))
+
+    log_probs = log_probs.flatten()
+    log_total_probs, _ = theano.scan(
+        logadd,
+        sequences=[log_probs[1:]],
+        # log of 1
+        outputs_info=[log_probs[0]]
+    )
+    return -T.sum(log_total_probs[-1])
 
 
 def rnn_check_array(X, y=None):
@@ -752,12 +810,9 @@ def rnn_check_array(X, y=None):
 
 
 class RecurrentNetwork(BaseMinet, TrainingMixin):
-    """
-    CTC cost based on code by Shawn Tan.
-    """
     def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
-                 recurrent_activation="tanh", feedforward_activation="tanh",
+                 recurrent_activation="tanh",
                  bidirectional=False, cost="ctc", save_frequency=10,
                  model_save_name="saved_model", random_seed=None):
         if random_seed is None or type(random_seed) is int:
@@ -781,14 +836,6 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         else:
             raise ValueError("Value %s not understood for recurrent_activation"
                              % recurrent_activation)
-
-        if feedforward_activation == "tanh":
-            self.feedforward_activation = T.tanh
-        elif feedforward_activation == "relu":
-            self.feedforward_activation = relu
-        else:
-            raise ValueError("Value %s not understood" % feedforward_activation,
-                             "for feedfirward_activation")
 
     def _setup_functions(self, X_sym, y_sym, layer_sizes):
         input_variable = X_sym
@@ -819,22 +866,16 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
 
                 input_variable = T.dot(forward_hidden, Wfo) + T.dot(
                     backward_hidden, Wbo) + by
-                # Linear activation before softmax
-                if i != (len(layer_sizes) - 3):
-                    input_variable = self.feedforward_activation(input_variable)
             else:
                 Wo = shared_rand((hidden_size, output_size), self.random_state)
                 bo = shared_zeros((output_size,))
                 params = forward_params + [Wo, bo]
-
                 input_variable = T.dot(forward_hidden, Wo) + bo
-                # Linear activation before softmax
-                if i != (len(layer_sizes) - 3):
-                    input_variable = self.feedforward_activation(input_variable)
 
         if self.cost == "ctc":
             y_hat_sym = T.nnet.softmax(input_variable)
-            cost = ctc_cost(y_hat_sym, y_sym)
+            # cost = ctc_cost(y_hat_sym, y_sym)
+            cost = log_ctc_cost(y_hat_sym, y_sym)
         elif self.cost == "softmax":
             y_hat_sym = T.nnet.softmax(input_variable)
             cost = softmax_cost(y_hat_sym, y_sym)
@@ -858,9 +899,23 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
     def fit(self, X, y, valid_X=None, valid_y=None):
         X = rnn_check_array(X)
         input_size = X[0].shape[1]
-        # Assume that class values are sequential
+        # Assume that class values are sequential and start from 0
         highest_class = np.max([np.max(d) for d in y])
         lowest_class = np.min([np.min(d) for d in y])
+        if lowest_class != 0:
+            raise ValueError("Labels must start from 0!")
+        if self.cost == "ctc":
+            # Need to insert blanks at start, end, and between each label
+            # See A. Graves "Supervised Sequence Labelling with Recurrent Neural
+            # Networks" figure 7.2 (pg. 58)
+            # (http://www.cs.toronto.edu/~graves/preprint.pdf)
+            blank = highest_class + 1
+            y_fixed = [blank * np.ones(2 * yi.shape[0] + 1).astype('int32')
+                       for yi in y]
+            for i, yi in enumerate(y):
+                y_fixed[i][1:-1:2] = yi
+            y = y_fixed
+            highest_class = blank
         # +1 to include endpoint
         output_size = len(np.arange(lowest_class, highest_class + 1))
         X_sym = T.matrix('x')
@@ -883,7 +938,9 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
             for n in range(len(X)):
                 train_loss = self.fit_function(X[n], y[n])
                 total_train_loss += train_loss
-            self.training_loss_.append(total_train_loss / len(X))
+            current_train_loss = total_train_loss / len(X)
+            print("Training loss %f" % current_train_loss)
+            self.training_loss_.append(current_train_loss)
 
             if (itr % self.save_frequency) == 0 or (itr == self.max_iter):
                 f = open(self.model_save_name + "_snapshot.pkl", 'wb')
