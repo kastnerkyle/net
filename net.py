@@ -869,9 +869,10 @@ def rnn_check_array(X, y=None):
         elif type(y) == np.ndarray and len(y.shape) == 2:
             y = y
         elif type(y) == list:
-            if type(y[0]) == np.ndarray and len(y.shape) == 1:
+            if type(y[0]) == np.ndarray and len(y[0].shape) == 1:
                 y = [yi.astype('int32') for yi in y]
-            y = [np.asarray(y).astype('int32')]
+            elif type(y[0]) != np.ndarray:
+                y = [np.asarray(y).astype('int32')]
         try:
             y[0].shape[0]
         except AttributeError:
