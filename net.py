@@ -852,13 +852,16 @@ def rnn_check_array(X, y=None):
     elif type(X) == np.ndarray and len(X.shape) == 3:
         X = X
     elif type(X) == list:
-        assert type(X[0]) == np.ndarray
-        assert X[0].shape == 2
-        X = [x.astype(theano.config.floatX) for x in X]
+        if type(X[0]) == np.ndarray and len(X[0].shape) == 2:
+            X = [x.astype(theano.config.floatX) for x in X]
+        else:
+            raise ValueError("X must be a 2D numpy array or an"
+                             "iterable of 2D numpy arrays")
     try:
         X[0].shape[1]
     except AttributeError:
-        raise ValueError("X must be an iterable of 2D numpy arrays")
+        raise ValueError("X must be a 2D numpy array or an"
+                         "iterable of 2D numpy arrays")
 
     if y is not None:
         if type(y) == np.ndarray and len(y.shape) == 1:
@@ -872,7 +875,7 @@ def rnn_check_array(X, y=None):
         try:
             y[0].shape[0]
         except AttributeError:
-            raise ValueError("y must be an interable of 1D numpy arrays")
+            raise ValueError("y must be an iterable of 1D numpy arrays")
     return X, y
 
 
