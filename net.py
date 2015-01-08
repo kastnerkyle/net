@@ -17,6 +17,8 @@ import glob
 import theano
 import theano.tensor as T
 from theano.compat.python2x import OrderedDict
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import warnings
 # Sandbox?
@@ -254,6 +256,7 @@ def load_librispeech():
         try:
             import urllib
             urllib.urlretrieve('http://google.com')
+            url = 'http://www.openslr.org/resources/12/dev-clean.tar.gz'
         except AttributeError:
             import urllib.request as urllib
             url = 'http://www.openslr.org/resources/12/dev-clean.tar.gz'
@@ -305,7 +308,8 @@ def load_librispeech():
                 data_y.append(np.array(chars, dtype='int32'))
                 audio_path = [a for a in audio_matches if file_tag in a]
                 if len(audio_path) != 1:
-                    raise ValueError("More than one match for tag %s!" % file_tag)
+                    raise ValueError("More than one match for"
+                                     "tag %s!" % file_tag)
                 if not os.path.exists(audio_path[0][:-5] + ".wav"):
                     r = os.system("ffmpeg -i %s %s.wav" % (audio_path[0],
                                                            audio_path[0][:-5]))
@@ -322,6 +326,7 @@ def load_librispeech():
             f.close()
         h5_file.close()
 
+    h5_file_path = os.path.join(data_path, "saved_libri.h5")
     h5_file = tables.openFile(h5_file_path, mode='r')
     data_x = h5_file.root.data_x
     data_x_shapes = h5_file.root.data_x_shapes
@@ -334,7 +339,8 @@ def load_librispeech():
 
     def getter(self, key):
         if isinstance(key, numbers.Integral) or isinstance(key, np.integer):
-            return old_getter(key).reshape(data_x_shapes[key])
+            return old_getter(key).reshape(data_x_shapes[key]).astype(
+                theano.config.floatX)
         elif isinstance(key, slice):
             start, stop, step = self._processRange(key.start, key.stop,
                                                    key.step)
@@ -413,6 +419,53 @@ class TrainingMixin(object):
             update_step *= (scaling_num / scaling_den)
             self.momentum_velocity_[n] = update_step
             updates[param] = param + update_step
+
+        train_fn = theano.function(inputs=[X_sym, y_sym],
+                                   outputs=cost,
+                                   updates=updates)
+        return train_fn
+
+    def get_clip_rmsprop_trainer(self, X_sym, y_sym, params, cost,
+                                 learning_rate, momentum):
+        gparams = T.grad(cost, params)
+        updates = OrderedDict()
+
+        if not hasattr(self, "running_average_"):
+            self.running_square_ = [0.] * len(gparams)
+            self.running_avg_ = [0.] * len(gparams)
+            self.updates_storage_ = [0.] * len(gparams)
+
+        if not hasattr(self, "momentum_velocity_"):
+            self.momentum_velocity_ = [0.] * len(gparams)
+
+        for n, (param, gparam) in enumerate(zip(params, gparams)):
+            combination_coeff = 0.9
+            minimum_grad = 1e-4
+            old_square = self.running_square_[n]
+            new_square = combination_coeff * old_square + (
+                1. - combination_coeff) * T.sqr(gparam)
+            old_avg = self.running_avg_[n]
+            new_avg = combination_coeff * old_avg + (
+                1. - combination_coeff) * gparam
+            rms_grad = T.sqrt(new_square - new_avg ** 2)
+            rms_grad = T.maximum(rms_grad, minimum_grad)
+            velocity = self.momentum_velocity_[n]
+            update_step = momentum * velocity - learning_rate * (
+                gparam / rms_grad)
+            self.running_square_[n] = new_square
+            self.running_avg_[n] = new_avg
+            self.updates_storage_[n] = update_step
+
+        # Clipping after calculation of updates and momentum
+        clipping_threshold = 1.
+        grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(),
+                                   self.updates_storage_)))
+        scaling_den = T.maximum(clipping_threshold, grad_norm)
+        scaling_num = clipping_threshold
+        for n, param in enumerate(params):
+            update_step = self.updates_storage_[n] * (scaling_num / scaling_den)
+            updates[param] = param + update_step
+            self.momentum_velocity_[n] = update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
@@ -738,7 +791,7 @@ def path_probs(predict, y_sym):
 
 
 def _epslog(X):
-    return T.log(X + 1E-22)
+    return T.cast(T.log(X + 1E-22), theano.config.floatX)
 
 
 def log_path_probs(y_hat_sym, y_sym):
@@ -774,10 +827,6 @@ def log_ctc_cost(y_hat_sym, y_sym):
     """
     Based on code from Shawn Tan with sum calculations in log space
     """
-    #forward_probs = path_probs(y_hat_sym, y_sym)
-    #backward_probs = path_probs(y_hat_sym[::-1], y_sym[::-1])[::-1, ::-1]
-    #log_probs = epslog(forward_probs) + epslog(backward_probs) - epslog(
-    #    y_hat_sym[:, y_sym])
     log_forward_probs = log_path_probs(y_hat_sym, y_sym)
     log_backward_probs = log_path_probs(
         y_hat_sym[::-1], y_sym[::-1])[::-1, ::-1]
@@ -799,20 +848,38 @@ def log_ctc_cost(y_hat_sym, y_sym):
 
 def rnn_check_array(X, y=None):
     if type(X) == np.ndarray and len(X.shape) == 2:
-        return [X]
+        X = [X]
     elif type(X) == np.ndarray and len(X.shape) == 3:
-        return X
+        X = X
+    elif type(X) == list:
+        assert type(X[0]) == np.ndarray
+        assert X[0].shape == 2
+        X = [x.astype(theano.config.floatX) for x in X]
     try:
         X[0].shape[1]
     except AttributeError:
         raise ValueError("X must be an iterable of 2D numpy arrays")
-    return X
+
+    if y is not None:
+        if type(y) == np.ndarray and len(y.shape) == 1:
+            y = [y]
+        elif type(y) == np.ndarray and len(y.shape) == 2:
+            y = y
+        elif type(y) == list:
+            if type(y[0]) == np.ndarray and len(y.shape) == 1:
+                y = [yi.astype('int32') for yi in y]
+            y = [np.asarray(y).astype('int32')]
+        try:
+            y[0].shape[0]
+        except AttributeError:
+            raise ValueError("y must be an interable of 1D numpy arrays")
+    return X, y
 
 
 class RecurrentNetwork(BaseMinet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
-                 recurrent_activation="tanh",
+                 recurrent_activation="tanh", l2_reg=0.01,
                  bidirectional=False, cost="ctc", save_frequency=10,
                  model_save_name="saved_model", random_seed=None):
         if random_seed is None or type(random_seed) is int:
@@ -822,6 +889,7 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         self.momentum = momentum
         self.bidirectional = bidirectional
         self.cost = cost
+        self.l2_reg = l2_reg
         self.hidden_layer_sizes = hidden_layer_sizes
         self.max_iter = int(max_iter)
         self.save_frequency = save_frequency
@@ -863,7 +931,6 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
                 Wbo = shared_rand((hidden_size, output_size), self.random_state)
                 by = shared_zeros((output_size,))
                 params = forward_params + backward_params + [Wfo, Wbo, by]
-
                 input_variable = T.dot(forward_hidden, Wfo) + T.dot(
                     backward_hidden, Wbo) + by
             else:
@@ -872,18 +939,24 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
                 params = forward_params + [Wo, bo]
                 input_variable = T.dot(forward_hidden, Wo) + bo
 
+        y_hat_sym = T.nnet.softmax(input_variable)
         if self.cost == "ctc":
-            y_hat_sym = T.nnet.softmax(input_variable)
             # cost = ctc_cost(y_hat_sym, y_sym)
             cost = log_ctc_cost(y_hat_sym, y_sym)
         elif self.cost == "softmax":
-            y_hat_sym = T.nnet.softmax(input_variable)
             cost = softmax_cost(y_hat_sym, y_sym)
+
+        # add L2 constraint to keep weights from exploding
+        for param in params:
+            cost += self.l2_reg * T.sum(param ** 2)
 
         self.params_ = params
 
         if self.learning_alg == "sgd":
             self.fit_function = self.get_clip_sgd_trainer(
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
+        elif self.learning_alg == "rmsprop":
+            self.fit_function = self.get_clip_rmsprop_trainer(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
@@ -897,7 +970,7 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
             outputs=[y_hat_sym],)
 
     def fit(self, X, y, valid_X=None, valid_y=None):
-        X = rnn_check_array(X)
+        X, y = rnn_check_array(X, y)
         input_size = X[0].shape[1]
         # Assume that class values are sequential and start from 0
         highest_class = np.max([np.max(d) for d in y])
@@ -929,7 +1002,18 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
                                   self.layer_sizes_)
         self.training_loss_ = []
         if valid_X is not None:
+            valid_X, valid_y = rnn_check_array(valid_X, valid_y)
             self.validation_loss_ = []
+            if self.cost == "ctc":
+                # Need to insert blanks at start, end, and between each label
+                # See A. Graves "Supervised Sequence Labelling with
+                # Recurrent Neural Networks" figure 7.2 (pg. 58)
+                # (http://www.cs.toronto.edu/~graves/preprint.pdf)
+                y_fixed = [blank * np.ones(2 * yi.shape[0] + 1).astype('int32')
+                           for yi in valid_y]
+                for i, yi in enumerate(valid_y):
+                    y_fixed[i][1:-1:2] = yi
+                valid_y = y_fixed
 
         best_valid_loss = np.inf
         for itr in range(self.max_iter):
