@@ -14,6 +14,7 @@ from scipy.io import wavfile
 import tables
 import numbers
 import glob
+from random import shuffle
 import theano
 import theano.tensor as T
 from theano.compat.python2x import OrderedDict
@@ -24,6 +25,10 @@ import warnings
 # Sandbox?
 import fnmatch
 from theano.tensor.shared_randomstreams import RandomStreams
+
+
+def labels_to_chars(labels):
+    return "".join([chr(l + 97) for l in labels])
 
 
 def relu(x):
@@ -241,6 +246,104 @@ class _cVLArray(tables.VLArray):
     pass
 
 
+def load_fruitspeech():
+    # Check if dataset is in the data directory.
+    data_path = os.path.join(os.path.split(__file__)[0], "data")
+    if not os.path.exists(data_path):
+        os.makedirs(data_path)
+
+    dataset = 'audio.tar.gz'
+    data_file = os.path.join(data_path, dataset)
+    if os.path.isfile(data_file):
+        dataset = data_file
+
+    if not os.path.isfile(data_file):
+        try:
+            import urllib
+            urllib.urlretrieve('http://google.com')
+            url = 'https://dl.dropboxusercontent.com/u/15378192/audio.tar.gz'
+        except AttributeError:
+            import urllib.request as urllib
+            url = 'https://dl.dropboxusercontent.com/u/15378192/audio.tar.gz'
+        print('Downloading data from %s' % url)
+        urllib.urlretrieve(url, data_file)
+
+    print('... loading data')
+    if not os.path.exists(os.path.join(data_path, "audio")):
+        tar = tarfile.open(data_file)
+        os.chdir(data_path)
+        tar.extractall()
+        tar.close()
+
+    h5_file_path = os.path.join(data_path, "saved_fruit.h5")
+    if not os.path.exists(h5_file_path):
+        data_path = os.path.join(data_path, "audio")
+
+        audio_matches = []
+        for root, dirnames, filenames in os.walk(data_path):
+            for filename in fnmatch.filter(filenames, '*.wav'):
+                audio_matches.append(os.path.join(root, filename))
+
+        shuffle(audio_matches)
+
+        # http://mail.scipy.org/pipermail/numpy-discussion/2011-March/055219.html
+        h5_file = tables.openFile(h5_file_path, mode='w')
+        data_x = h5_file.createVLArray(h5_file.root, 'data_x',
+                                       tables.Float32Atom(shape=()),
+                                       filters=tables.Filters(1))
+        data_x_shapes = h5_file.createVLArray(h5_file.root, 'data_x_shapes',
+                                              tables.Int32Atom(shape=()),
+                                              filters=tables.Filters(1))
+        data_y = h5_file.createVLArray(h5_file.root, 'data_y',
+                                       tables.Int32Atom(shape=()),
+                                       filters=tables.Filters(1))
+        for wav_path in audio_matches:
+            # Convert chars to int classes
+            word = wav_path.split(os.sep)[-1][:-6]
+            chars = [ord(c) - 97 for c in word]
+            data_y.append(np.array(chars, dtype='int32'))
+            fs, d = wavfile.read(wav_path)
+            # Preprocessing from A. Graves "Towards End-to-End Speech
+            # Recognition"
+            Pxx, _, _, _ = plt.specgram(d, NFFT=256, noverlap=128)
+            data_x_shapes.append(np.array(Pxx.T.shape, dtype='int32'))
+            data_x.append(Pxx.T.astype('float32').flatten())
+        h5_file.close()
+
+    h5_file = tables.openFile(h5_file_path, mode='r')
+    data_x = h5_file.root.data_x
+    data_x_shapes = h5_file.root.data_x_shapes
+    data_y = h5_file.root.data_y
+    # A dirty hack to only monkeypatch data_x
+    data_x.__class__ = _cVLArray
+
+    # override getter so that it gets reshaped to 2D when fetched
+    old_getter = data_x.__getitem__
+
+    def getter(self, key):
+        if isinstance(key, numbers.Integral) or isinstance(key, np.integer):
+            return old_getter(key).reshape(data_x_shapes[key]).astype(
+                theano.config.floatX)
+        elif isinstance(key, slice):
+            start, stop, step = self._processRange(key.start, key.stop,
+                                                   key.step)
+            return [o.reshape(s) for o, s in zip(
+                self.read(start, stop, step), data_x_shapes[slice(
+                    start, stop, step)])]
+
+    # Patch __getitem__ in custom subclass, applying to all instances of it
+    _cVLArray.__getitem__ = getter
+
+    train_x = data_x[:80]
+    train_y = data_y[:80]
+    valid_x = data_x[80:90]
+    valid_y = data_y[80:90]
+    test_x = data_x[90:]
+    test_y = data_y[90:]
+    rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
+    return rval
+
+
 def load_librispeech():
     # Check if dataset is in the data directory.
     data_path = os.path.join(os.path.split(__file__)[0], "data")
@@ -401,6 +504,19 @@ class TrainingMixin(object):
                                    updates=updates)
         return train_fn
 
+    def _norm_constraint(self, param, update_step):
+        stepped_param = param + update_step
+        if param.get_value(borrow=True).ndim == 2:
+            col_norms = T.sqrt(T.sum(T.sqr(stepped_param), axis=0))
+            desired_norms = T.clip(col_norms, 0, T.sqrt(1.9365))
+            scale = desired_norms / (1e-7 + col_norms)
+            new_param = param * scale
+            new_update_step = update_step * scale
+        else:
+            new_param = param
+            new_update_step = update_step
+        return new_param, new_update_step
+
     def get_clip_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate,
                              momentum):
         gparams = T.grad(cost, params)
@@ -418,7 +534,9 @@ class TrainingMixin(object):
             update_step = momentum * velocity - learning_rate * gparam
             update_step *= (scaling_num / scaling_den)
             self.momentum_velocity_[n] = update_step
-            updates[param] = param + update_step
+            new_param, new_update_step = self._norm_constraint(param,
+                                                               update_step)
+            updates[param] = new_param + new_update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
@@ -464,8 +582,11 @@ class TrainingMixin(object):
         scaling_num = clipping_threshold
         for n, param in enumerate(params):
             update_step = self.updates_storage_[n] * (scaling_num / scaling_den)
-            updates[param] = param + update_step
+            self.updates_storage_[n] = update_step
             self.momentum_velocity_[n] = update_step
+            new_param, new_update_step = self._norm_constraint(param,
+                                                               update_step)
+            updates[param] = new_param + new_update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
@@ -791,7 +912,7 @@ def path_probs(predict, y_sym):
 
 
 def _epslog(X):
-    return T.cast(T.log(X + 1E-22), theano.config.floatX)
+    return T.cast(T.log(X + 1E-9), theano.config.floatX)
 
 
 def log_path_probs(y_hat_sym, y_sym):
@@ -806,7 +927,7 @@ def log_path_probs(y_hat_sym, y_sym):
 
     log_probs, _ = theano.scan(
         step,
-        sequences=[_epslog(pred_y)],
+        sequences=[T.log(pred_y)],
         outputs_info=[_epslog(T.eye(y_sym.shape[0])[0])]
     )
     return log_probs
@@ -877,7 +998,10 @@ def rnn_check_array(X, y=None):
             y[0].shape[0]
         except AttributeError:
             raise ValueError("y must be an iterable of 1D numpy arrays")
-    return X, y
+        return X, y
+    else:
+        # If y is not passed don't return it
+        return X
 
 
 class RecurrentNetwork(BaseMinet, TrainingMixin):
@@ -949,10 +1073,6 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
             cost = log_ctc_cost(y_hat_sym, y_sym)
         elif self.cost == "softmax":
             cost = softmax_cost(y_hat_sym, y_sym)
-
-        # add L2 constraint to keep weights from exploding
-        for param in params:
-            cost += self.l2_reg * T.sum(param ** 2)
 
         self.params_ = params
 
