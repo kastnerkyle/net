@@ -504,11 +504,11 @@ class TrainingMixin(object):
                                    updates=updates)
         return train_fn
 
-    def _norm_constraint(self, param, update_step):
+    def _norm_constraint(self, param, update_step, max_col_norm):
         stepped_param = param + update_step
         if param.get_value(borrow=True).ndim == 2:
             col_norms = T.sqrt(T.sum(T.sqr(stepped_param), axis=0))
-            desired_norms = T.clip(col_norms, 0, T.sqrt(1.9365))
+            desired_norms = T.clip(col_norms, 0, max_col_norm)
             scale = desired_norms / (1e-7 + col_norms)
             new_param = param * scale
             new_update_step = update_step * scale
@@ -518,7 +518,7 @@ class TrainingMixin(object):
         return new_param, new_update_step
 
     def get_clip_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate,
-                             momentum):
+                             momentum, max_col_norm):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
 
@@ -534,8 +534,8 @@ class TrainingMixin(object):
             update_step = momentum * velocity - learning_rate * gparam
             update_step *= (scaling_num / scaling_den)
             self.momentum_velocity_[n] = update_step
-            new_param, new_update_step = self._norm_constraint(param,
-                                                               update_step)
+            new_param, new_update_step = self._norm_constraint(
+                param, update_step, max_col_norm)
             updates[param] = new_param + new_update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
@@ -544,7 +544,7 @@ class TrainingMixin(object):
         return train_fn
 
     def get_clip_rmsprop_trainer(self, X_sym, y_sym, params, cost,
-                                 learning_rate, momentum):
+                                 learning_rate, momentum, max_col_norm):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
 
@@ -584,8 +584,8 @@ class TrainingMixin(object):
             update_step = self.updates_storage_[n] * (scaling_num / scaling_den)
             self.updates_storage_[n] = update_step
             self.momentum_velocity_[n] = update_step
-            new_param, new_update_step = self._norm_constraint(param,
-                                                               update_step)
+            new_param, new_update_step = self._norm_constraint(
+                param, update_step, max_col_norm)
             updates[param] = new_param + new_update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
@@ -912,7 +912,7 @@ def path_probs(predict, y_sym):
 
 
 def _epslog(X):
-    return T.cast(T.log(X + 1E-9), theano.config.floatX)
+    return T.cast(T.log(T.clip(X, 1E-12, 1E12)), theano.config.floatX)
 
 
 def log_path_probs(y_hat_sym, y_sym):
@@ -927,7 +927,7 @@ def log_path_probs(y_hat_sym, y_sym):
 
     log_probs, _ = theano.scan(
         step,
-        sequences=[T.log(pred_y)],
+        sequences=[_epslog(pred_y)],
         outputs_info=[_epslog(T.eye(y_sym.shape[0])[0])]
     )
     return log_probs
@@ -1007,7 +1007,7 @@ def rnn_check_array(X, y=None):
 class RecurrentNetwork(BaseMinet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
-                 recurrent_activation="tanh", l2_reg=0.01,
+                 recurrent_activation="tanh", max_col_norm=1.9365,
                  bidirectional=False, cost="ctc", save_frequency=10,
                  model_save_name="saved_model", random_seed=None):
         if random_seed is None or type(random_seed) is int:
@@ -1017,7 +1017,7 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         self.momentum = momentum
         self.bidirectional = bidirectional
         self.cost = cost
-        self.l2_reg = l2_reg
+        self.max_col_norm = max_col_norm
         self.hidden_layer_sizes = hidden_layer_sizes
         self.max_iter = int(max_iter)
         self.save_frequency = save_frequency
@@ -1078,10 +1078,12 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
 
         if self.learning_alg == "sgd":
             self.fit_function = self.get_clip_sgd_trainer(
-                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
+            self.max_col_norm)
         elif self.learning_alg == "rmsprop":
             self.fit_function = self.get_clip_rmsprop_trainer(
-                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
+            self.max_col_norm)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
                              % self.learning_alg)
