@@ -14,8 +14,9 @@ from scipy.io import wavfile
 import tables
 import numbers
 import glob
-from random import shuffle
+import random
 import theano
+import string
 import theano.tensor as T
 from theano.compat.python2x import OrderedDict
 import matplotlib
@@ -218,17 +219,6 @@ def load_scribe():
     for x, y in zip(data['x'], data['y']):
         data_y.append(np.asarray(y, dtype=np.int32))
         data_x.append(np.asarray(x, dtype=theano.config.floatX).T)
-    """
-    Original
-    n_classes = data['nChars']
-    for x, y in zip(data['x'], data['y']):
-        # Need to make alternate characters blanks (index as nClasses)
-        y1 = [n_classes]
-        for char in y:
-            y1 += [char, n_classes]
-        data_y.append(np.asarray(y1, dtype=np.int32))
-        data_x.append(np.asarray(x, dtype=theano.config.floatX).T)
-    """
 
     train_x = data_x[:750]
     train_y = data_y[:750]
@@ -284,7 +274,8 @@ def load_fruitspeech():
             for filename in fnmatch.filter(filenames, '*.wav'):
                 audio_matches.append(os.path.join(root, filename))
 
-        shuffle(audio_matches)
+        random.seed(1999)
+        random.shuffle(audio_matches)
 
         # http://mail.scipy.org/pipermail/numpy-discussion/2011-March/055219.html
         h5_file = tables.openFile(h5_file_path, mode='w')
@@ -340,6 +331,148 @@ def load_fruitspeech():
     valid_y = data_y[80:90]
     test_x = data_x[90:]
     test_y = data_y[90:]
+    rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
+    return rval
+
+
+def load_cmuarctic():
+    # Check if dataset is in the data directory.
+    data_path = os.path.join(os.path.split(__file__)[0], "data")
+    if not os.path.exists(data_path):
+        os.makedirs(data_path)
+
+    urls = ['http://www.speech.cs.cmu.edu/cmu_arctic/packed/cmu_us_awb_arctic-0.95-release.tar.bz2',
+            'http://www.speech.cs.cmu.edu/cmu_arctic/packed/cmu_us_bdl_arctic-0.95-release.tar.bz2',
+            'http://www.speech.cs.cmu.edu/cmu_arctic/packed/cmu_us_clb_arctic-0.95-release.tar.bz2',
+            'http://www.speech.cs.cmu.edu/cmu_arctic/packed/cmu_us_jmk_arctic-0.95-release.tar.bz2',
+            'http://www.speech.cs.cmu.edu/cmu_arctic/packed/cmu_us_ksp_arctic-0.95-release.tar.bz2',
+            'http://www.speech.cs.cmu.edu/cmu_arctic/packed/cmu_us_rms_arctic-0.95-release.tar.bz2',
+            'http://www.speech.cs.cmu.edu/cmu_arctic/packed/cmu_us_slt_arctic-0.95-release.tar.bz2',
+            ]
+
+    data_files = []
+
+    for url in urls:
+        dataset = url.split('/')[-1]
+        data_file = os.path.join(data_path, dataset)
+        data_files.append(data_file)
+        if os.path.isfile(data_file):
+            dataset = data_file
+        if not os.path.isfile(data_file):
+            try:
+                import urllib
+                urllib.urlretrieve('http://google.com')
+            except AttributeError:
+                import urllib.request as urllib
+            print('Downloading data from %s' % url)
+            urllib.urlretrieve(url, data_file)
+
+    print('... loading data')
+
+    folder_paths = []
+    for data_file in data_files:
+        folder_name = data_file.split(os.sep)[-1].split("-")[0]
+        folder_path = os.path.join(data_path, folder_name)
+        folder_paths.append(folder_path)
+        if not os.path.exists(folder_path):
+            tar = tarfile.open(data_file)
+            os.chdir(data_path)
+            tar.extractall()
+            tar.close()
+
+    h5_file_path = os.path.join(data_path, "saved_cmu.h5")
+    if not os.path.exists(h5_file_path):
+        # http://mail.scipy.org/pipermail/numpy-discussion/2011-March/055219.html
+        h5_file = tables.openFile(h5_file_path, mode='w')
+        data_x = h5_file.createVLArray(h5_file.root, 'data_x',
+                                       tables.Float32Atom(shape=()),
+                                       filters=tables.Filters(1))
+        data_x_shapes = h5_file.createVLArray(h5_file.root, 'data_x_shapes',
+                                              tables.Int32Atom(shape=()),
+                                              filters=tables.Filters(1))
+        data_y = h5_file.createVLArray(h5_file.root, 'data_y',
+                                       tables.Int32Atom(shape=()),
+                                       filters=tables.Filters(1))
+        data_meta = h5_file.createVLArray(h5_file.root, 'data_meta',
+                                          tables.StringAtom(200),
+                                          filters=tables.Filters(1))
+        for folder_path in folder_paths:
+            audio_matches = []
+            for root, dirnames, filenames in os.walk(folder_path):
+                for filename in fnmatch.filter(filenames, '*.wav'):
+                    audio_matches.append(os.path.join(root, filename))
+
+            f = open(os.path.join(folder_path, "etc", "txt.done.data"))
+            read_raw_text = f.readlines()
+            f.close()
+            # Remove all punctuations
+            list_text = [t.strip().lower().translate(
+                string.maketrans("", ""), string.punctuation).split(" ")[1:-1]
+                for t in read_raw_text]
+            # Get rid of numbers, even though it will probably hurt
+            # recognition on certain examples
+            cleaned_lookup = {lt[0]: " ".join(lt[1:]).translate(
+                None, string.digits).strip() for lt in list_text}
+            data_meta.append(folder_path.split(os.sep)[-1])
+
+            for wav_path in audio_matches:
+                lookup_key = wav_path.split(os.sep)[-1][:-4]
+                # Some files aren't consistent!
+                if "_" in cleaned_lookup.keys()[0] and "_" not in lookup_key:
+                    # Needs an _ to match text format... sometimes!
+                    lookup_key = lookup_key[:6] + "_" + lookup_key[6:]
+                elif "_" not in cleaned_lookup.keys()[0]:
+                    lookup_key = lookup_key.translate(None, "_")
+                try:
+                    words = cleaned_lookup[lookup_key]
+                    # Convert chars to int classes
+                    chars = [ord(c) - 97 for c in (" ").join(words)]
+                    # Make spaces last class
+                    chars = [c if c >= 0 else 26 for c in chars]
+                    data_y.append(np.array(chars, dtype='int32'))
+                    # Convert chars to int classes
+                    fs, d = wavfile.read(wav_path)
+                    # Preprocessing from A. Graves "Towards End-to-End Speech
+                    # Recognition"
+                    Pxx, _, _, _ = plt.specgram(d, NFFT=256, noverlap=128)
+                    data_x_shapes.append(np.array(Pxx.T.shape, dtype='int32'))
+                    data_x.append(Pxx.T.astype('float32').flatten())
+                except KeyError:
+                    # Necessary because some labels are missing in some folders
+                    print("Skipping %s due to missing key" % wav_path)
+
+        h5_file.close()
+
+    h5_file = tables.openFile(h5_file_path, mode='r')
+    data_x = h5_file.root.data_x
+    data_x_shapes = h5_file.root.data_x_shapes
+    data_y = h5_file.root.data_y
+    # A dirty hack to only monkeypatch data_x
+    data_x.__class__ = _cVLArray
+
+    # override getter so that it gets reshaped to 2D when fetched
+    old_getter = data_x.__getitem__
+
+    def getter(self, key):
+        if isinstance(key, numbers.Integral) or isinstance(key, np.integer):
+            return old_getter(key).reshape(data_x_shapes[key]).astype(
+                theano.config.floatX)
+        elif isinstance(key, slice):
+            start, stop, step = self._processRange(key.start, key.stop,
+                                                   key.step)
+            return [o.reshape(s) for o, s in zip(
+                self.read(start, stop, step), data_x_shapes[slice(
+                    start, stop, step)])]
+
+    # Patch __getitem__ in custom subclass, applying to all instances of it
+    _cVLArray.__getitem__ = getter
+
+    train_x = data_x[:6000]
+    train_y = data_y[:6000]
+    valid_x = data_x[6000:7500]
+    valid_y = data_y[6000:7500]
+    test_x = data_x[7500:]
+    test_y = data_y[7500:]
     rval = [(train_x, train_y), (valid_x, valid_y), (test_x, test_y)]
     return rval
 
@@ -1079,11 +1212,11 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         if self.learning_alg == "sgd":
             self.fit_function = self.get_clip_sgd_trainer(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
-            self.max_col_norm)
+                self.max_col_norm)
         elif self.learning_alg == "rmsprop":
             self.fit_function = self.get_clip_rmsprop_trainer(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
-            self.max_col_norm)
+                self.max_col_norm)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
                              % self.learning_alg)
