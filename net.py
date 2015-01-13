@@ -716,6 +716,7 @@ class TrainingMixin(object):
             self.running_avg_[n] = new_avg
             self.updates_storage_[n] = update_step
             self.momentum_velocity_[n] = update_step
+            updates[param] = param + update_step
 
         """
         # Clipping after calculation of updates and momentum
