@@ -7,7 +7,7 @@ raise ValueError()
 clf = RecurrentNetwork(learning_alg="rmsprop",
                        hidden_layer_sizes=[500], max_col_norm=.75,
                        max_iter=100, cost="ctc", bidirectional=True,
-                       learning_rate=0.00002, momentum=0.9,
+                       learning_rate=0.00001, momentum=0.9,
                        recurrent_activation="lstm",
                        random_seed=1999)
 

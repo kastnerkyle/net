@@ -661,18 +661,17 @@ class TrainingMixin(object):
 
         # Gradient clipping
         grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(), gparams)))
-        scaling_den = T.maximum(1., grad_norm)
+        not_finite = T.or_(T.isnan(grad_norm), T.isinf(grad_norm))
+        grad_norm = T.sqrt(grad_norm)
         scaling_num = 1.
+        scaling_den = T.maximum(1., grad_norm)
         for n, (param, gparam) in enumerate(zip(params, gparams)):
             # clip gradient directly, not momentum etc.
-            gparam *= (scaling_num / scaling_den)
+            gparam = T.switch(not_finite, 0.1 * param,
+                              gparam * (scaling_num / scaling_den))
             velocity = self.momentum_velocity_[n]
             update_step = momentum * velocity - learning_rate * gparam
-            #update_step *= (scaling_num / scaling_den)
             self.momentum_velocity_[n] = update_step
-            #new_param, new_update_step = self._norm_constraint(
-            #    param, update_step, max_col_norm)
-            #updates[param] = new_param + new_update_step
             updates[param] = param + update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
@@ -695,10 +694,13 @@ class TrainingMixin(object):
 
         # Gradient clipping
         grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(), gparams)))
-        scaling_den = T.maximum(1., grad_norm)
+        not_finite = T.or_(T.isnan(grad_norm), T.isinf(grad_norm))
+        grad_norm = T.sqrt(grad_norm)
         scaling_num = 1.
+        scaling_den = T.maximum(1., grad_norm)
         for n, (param, gparam) in enumerate(zip(params, gparams)):
-            gparam *= (scaling_num / scaling_den)
+            gparam = T.switch(not_finite, 0.1 * param,
+                              gparam * (scaling_num / scaling_den))
             combination_coeff = 0.9
             minimum_grad = 1e-4
             old_square = self.running_square_[n]
@@ -716,23 +718,10 @@ class TrainingMixin(object):
             self.running_avg_[n] = new_avg
             self.updates_storage_[n] = update_step
             self.momentum_velocity_[n] = update_step
-            updates[param] = param + update_step
-
-        """
-        # Clipping after calculation of updates and momentum
-        clipping_threshold = 1.
-        grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(),
-                                   self.updates_storage_)))
-        scaling_den = T.maximum(clipping_threshold, grad_norm)
-        scaling_num = clipping_threshold
-        for n, param in enumerate(params):
-            update_step = self.updates_storage_[n] * (scaling_num / scaling_den)
-            self.updates_storage_[n] = update_step
-            self.momentum_velocity_[n] = update_step
             new_param, new_update_step = self._norm_constraint(
                 param, update_step, max_col_norm)
             updates[param] = new_param + new_update_step
-        """
+
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
                                    updates=updates)
