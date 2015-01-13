@@ -205,9 +205,10 @@ def load_scribe():
         try:
             import urllib
             urllib.urlretrieve('http://google.com')
+            url = 'https://dl.dropboxusercontent.com/u/15378192/scribe2.pkl'
         except AttributeError:
             import urllib.request as urllib
-            url = 'https://dl.dropboxusercontent.com/u/15378192/scribe.pkl'
+            url = 'https://dl.dropboxusercontent.com/u/15378192/scribe3.pkl'
         print('Downloading data from %s' % url)
         urllib.urlretrieve(url, data_file)
 
@@ -663,13 +664,16 @@ class TrainingMixin(object):
         scaling_den = T.maximum(1., grad_norm)
         scaling_num = 1.
         for n, (param, gparam) in enumerate(zip(params, gparams)):
+            # clip gradient directly, not momentum etc.
+            gparam *= (scaling_num / scaling_den)
             velocity = self.momentum_velocity_[n]
             update_step = momentum * velocity - learning_rate * gparam
-            update_step *= (scaling_num / scaling_den)
+            #update_step *= (scaling_num / scaling_den)
             self.momentum_velocity_[n] = update_step
-            new_param, new_update_step = self._norm_constraint(
-                param, update_step, max_col_norm)
-            updates[param] = new_param + new_update_step
+            #new_param, new_update_step = self._norm_constraint(
+            #    param, update_step, max_col_norm)
+            #updates[param] = new_param + new_update_step
+            updates[param] = param + update_step
 
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
@@ -689,7 +693,12 @@ class TrainingMixin(object):
         if not hasattr(self, "momentum_velocity_"):
             self.momentum_velocity_ = [0.] * len(gparams)
 
+        # Gradient clipping
+        grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(), gparams)))
+        scaling_den = T.maximum(1., grad_norm)
+        scaling_num = 1.
         for n, (param, gparam) in enumerate(zip(params, gparams)):
+            gparam *= (scaling_num / scaling_den)
             combination_coeff = 0.9
             minimum_grad = 1e-4
             old_square = self.running_square_[n]
@@ -706,7 +715,9 @@ class TrainingMixin(object):
             self.running_square_[n] = new_square
             self.running_avg_[n] = new_avg
             self.updates_storage_[n] = update_step
+            self.momentum_velocity_[n] = update_step
 
+        """
         # Clipping after calculation of updates and momentum
         clipping_threshold = 1.
         grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(),
@@ -720,10 +731,11 @@ class TrainingMixin(object):
             new_param, new_update_step = self._norm_constraint(
                 param, update_step, max_col_norm)
             updates[param] = new_param + new_update_step
-
+        """
         train_fn = theano.function(inputs=[X_sym, y_sym],
                                    outputs=cost,
                                    updates=updates)
+
         return train_fn
 
 
@@ -1102,9 +1114,9 @@ def log_ctc_cost(y_hat_sym, y_sym):
 
 def rnn_check_array(X, y=None):
     if type(X) == np.ndarray and len(X.shape) == 2:
-        X = [X]
+        X = [X.astype(theano.config.floatX)]
     elif type(X) == np.ndarray and len(X.shape) == 3:
-        X = X
+        X = X.astype(theano.config.floatX)
     elif type(X) == list:
         if type(X[0]) == np.ndarray and len(X[0].shape) == 2:
             X = [x.astype(theano.config.floatX) for x in X]
@@ -1119,9 +1131,9 @@ def rnn_check_array(X, y=None):
 
     if y is not None:
         if type(y) == np.ndarray and len(y.shape) == 1:
-            y = [y]
+            y = [y.astype('int32')]
         elif type(y) == np.ndarray and len(y.shape) == 2:
-            y = y
+            y = y.astype('int32')
         elif type(y) == list:
             if type(y[0]) == np.ndarray and len(y[0].shape) == 1:
                 y = [yi.astype('int32') for yi in y]
