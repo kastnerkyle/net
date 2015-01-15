@@ -32,6 +32,21 @@ def labels_to_chars(labels):
     return "".join([chr(l + 97) for l in labels])
 
 
+def _make_ctc_labels(y):
+    # Assume that class values are sequential! and start from 0
+    highest_class = np.max([np.max(d) for d in y])
+    # Need to insert blanks at start, end, and between each label
+    # See A. Graves "Supervised Sequence Labelling with Recurrent Neural
+    # Networks" figure 7.2 (pg. 58)
+    # (http://www.cs.toronto.edu/~graves/preprint.pdf)
+    blank = highest_class + 1
+    y_fixed = [blank * np.ones(2 * yi.shape[0] + 1).astype('int32')
+               for yi in y]
+    for i, yi in enumerate(y):
+        y_fixed[i][1:-1:2] = yi
+    return y_fixed
+
+
 def relu(x):
     return x * (x > 1e-6)
 
@@ -427,7 +442,7 @@ def load_cmuarctic():
                 try:
                     words = cleaned_lookup[lookup_key]
                     # Convert chars to int classes
-                    chars = [ord(c) - 97 for c in (" ").join(words)]
+                    chars = [ord(c) - 97 for c in words]
                     # Make spaces last class
                     chars = [c if c >= 0 else 26 for c in chars]
                     data_y.append(np.array(chars, dtype='int32'))
@@ -619,7 +634,7 @@ class BaseMinet(object):
 
 
 class TrainingMixin(object):
-    def get_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate,
+    def get_sgd_updates(self, X_sym, y_sym, params, cost, learning_rate,
                         momentum):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
@@ -633,10 +648,7 @@ class TrainingMixin(object):
             self.momentum_velocity_[n] = update_step
             updates[param] = param + update_step
 
-        train_fn = theano.function(inputs=[X_sym, y_sym],
-                                   outputs=cost,
-                                   updates=updates)
-        return train_fn
+        return updates
 
     def _norm_constraint(self, param, update_step, max_col_norm):
         stepped_param = param + update_step
@@ -651,7 +663,7 @@ class TrainingMixin(object):
             new_update_step = update_step
         return new_param, new_update_step
 
-    def get_clip_sgd_trainer(self, X_sym, y_sym, params, cost, learning_rate,
+    def get_clip_sgd_updates(self, X_sym, y_sym, params, cost, learning_rate,
                              momentum, max_col_norm):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
@@ -673,13 +685,9 @@ class TrainingMixin(object):
             update_step = momentum * velocity - learning_rate * gparam
             self.momentum_velocity_[n] = update_step
             updates[param] = param + update_step
+        return updates
 
-        train_fn = theano.function(inputs=[X_sym, y_sym],
-                                   outputs=cost,
-                                   updates=updates)
-        return train_fn
-
-    def get_clip_rmsprop_trainer(self, X_sym, y_sym, params, cost,
+    def get_clip_rmsprop_updates(self, X_sym, y_sym, params, cost,
                                  learning_rate, momentum, max_col_norm):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
@@ -722,11 +730,29 @@ class TrainingMixin(object):
                 param, update_step, max_col_norm)
             updates[param] = new_param + new_update_step
 
-        train_fn = theano.function(inputs=[X_sym, y_sym],
-                                   outputs=cost,
-                                   updates=updates)
+        return updates
 
-        return train_fn
+    def get_sfg_updates(self, X_sym, y_sym, params, cost,
+                        learning_rate, momentum, max_col_norm):
+        gparams = T.grad(cost, params)
+        updates = OrderedDict()
+        from sfg import SFG
+        if not hasattr(self, "sfg_"):
+            self.count_ = theano.shared(0)
+            self.slow_freq_ = 20
+            self.sfg_ = SFG(params, gparams)
+
+        slow_updates, fast_updates = self.sfg_.updates(self.learning_rate,
+                                                       self.momentum,
+                                                       epsilon=0.0001,
+                                                       momentum_clipping=None)
+        for param in slow_updates.keys():
+            updates[param] = theano.ifelse.ifelse(T.eq(self.count_,
+                                                       self.slow_freq_ - 1),
+                                                  slow_updates[param],
+                                                  fast_updates[param])
+        updates[self.count_] = T.mod(self.count_ + 1, self.slow_freq_)
+        return updates
 
 
 def build_linear_layer(input_size, output_size, input_variable, random_state):
@@ -831,13 +857,15 @@ class FeedforwardNetwork(BaseMinet, TrainingMixin):
         self.params_ = params
 
         if self.learning_alg == "sgd":
-            self.fit_function = self.get_sgd_trainer(X_sym, y_sym, params, cost,
-                                                     self.learning_rate,
-                                                     self.momentum)
+            updates = self.get_sgd_updats(X_sym, y_sym, params, cost,
+                                          self.learning_rate,
+                                          self.momentum)
         else:
             raise ValueError("Algorithm %s is not "
                              "a valid argument for learning_alg!"
                              % self.learning_alg)
+        self.fit_function = theano.function(
+            inputs=[X_sym, y_sym], outputs=cost, updates=updates)
         self.loss_function = theano.function(
             inputs=[X_sym, y_sym], outputs=cost)
 
@@ -1144,7 +1172,8 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
                  recurrent_activation="tanh", max_col_norm=1.9365,
                  bidirectional=False, cost="ctc", save_frequency=10,
-                 model_save_name="saved_model", random_seed=None):
+                 model_save_name="saved_model", random_seed=None,
+                 input_checking=True):
         if random_seed is None or type(random_seed) is int:
             self.random_state = np.random.RandomState(random_seed)
         self.learning_rate = learning_rate
@@ -1158,6 +1187,7 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         self.save_frequency = save_frequency
         self.model_save_name = model_save_name
         self.recurrent_activation = recurrent_activation
+        self.input_checking = input_checking
         if recurrent_activation == "tanh":
             self.recurrent_function = build_recurrent_tanh_layer
         elif recurrent_activation == "relu":
@@ -1170,17 +1200,22 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
 
     def _setup_functions(self, X_sym, y_sym, layer_sizes):
         input_variable = X_sym
-        if len(layer_sizes) % 2 == 0:
-            # If there aren't the right number of layer sizes, add a layer of
-            # the same size as the output
-            warnings.warn("Length of layer_sizes needs to be odd!\n"
-                          "Adding output layer of size %i" % layer_sizes[-1])
-            layer_sizes.append(layer_sizes[-1])
 
-        # Iterate in chunks of 3 creating recurrent layers
-        for i in range(0, len(layer_sizes) - 2, 2):
-            current_layers = layer_sizes[i:i+3]
-            input_size, hidden_size, output_size = current_layers
+        # layer_sizes consists of input size, all hidden sizes, and output size
+        hidden_sizes = layer_sizes[1:-1]
+        # set these to stop pep8 vim plugin from complaining
+        input_size = None
+        output_size = None
+        for n in range(len(hidden_sizes)):
+            if (n - 1) < 0:
+                input_size = layer_sizes[0]
+            else:
+                input_size = output_size
+            hidden_size = hidden_sizes[n]
+            if (n + 1) != len(hidden_sizes):
+                output_size = hidden_sizes[n + 1]
+            else:
+                output_size = layer_sizes[-1]
 
             forward_hidden, forward_params = self.recurrent_function(
                 input_size, hidden_size, output_size, input_variable,
@@ -1202,9 +1237,13 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
                 params = forward_params + [Wo, bo]
                 input_variable = T.dot(forward_hidden, Wo) + bo
 
-        y_hat_sym = T.nnet.softmax(input_variable)
+        # T.nnet.softmax doesn't define a gradient? wut
+        # y_hat_sym = T.nnet.softmax(input_variable)
+        # We can replace it with the mathematical expression and Theano will fix
+        y_hat_sym = T.exp(input_variable) / T.exp(input_variable).sum(
+            1, keepdims=True)
+
         if self.cost == "ctc":
-            # cost = ctc_cost(y_hat_sym, y_sym)
             cost = log_ctc_cost(y_hat_sym, y_sym)
         elif self.cost == "softmax":
             cost = softmax_cost(y_hat_sym, y_sym)
@@ -1212,16 +1251,24 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         self.params_ = params
 
         if self.learning_alg == "sgd":
-            self.fit_function = self.get_clip_sgd_trainer(
+            updates = self.get_clip_sgd_updates(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
                 self.max_col_norm)
         elif self.learning_alg == "rmsprop":
-            self.fit_function = self.get_clip_rmsprop_trainer(
+            updates = self.get_clip_rmsprop_updates(
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
+                self.max_col_norm)
+        elif self.learning_alg == "sfg":
+            updates = self.get_sfg_updates(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
                 self.max_col_norm)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
                              % self.learning_alg)
+
+        self.fit_function = theano.function(inputs=[X_sym, y_sym],
+                                            outputs=[cost, y_hat_sym],
+                                            updates=updates)
 
         self.loss_function = theano.function(inputs=[X_sym, y_sym],
                                              outputs=cost)
@@ -1231,25 +1278,21 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
             outputs=[y_hat_sym],)
 
     def fit(self, X, y, valid_X=None, valid_y=None):
-        X, y = rnn_check_array(X, y)
+        if self.input_checking:
+            X, y = rnn_check_array(X, y)
         input_size = X[0].shape[1]
-        # Assume that class values are sequential and start from 0
+        # Assume that class values are sequential! and start from 0
         highest_class = np.max([np.max(d) for d in y])
         lowest_class = np.min([np.min(d) for d in y])
         if lowest_class != 0:
             raise ValueError("Labels must start from 0!")
         if self.cost == "ctc":
-            # Need to insert blanks at start, end, and between each label
-            # See A. Graves "Supervised Sequence Labelling with Recurrent Neural
-            # Networks" figure 7.2 (pg. 58)
-            # (http://www.cs.toronto.edu/~graves/preprint.pdf)
-            blank = highest_class + 1
-            y_fixed = [blank * np.ones(2 * yi.shape[0] + 1).astype('int32')
-                       for yi in y]
-            for i, yi in enumerate(y):
-                y_fixed[i][1:-1:2] = yi
-            y = y_fixed
-            highest_class = blank
+            if self.input_checking:
+                y = _make_ctc_labels(y)
+            highest_class = np.max([np.max(d) for d in y])
+        # Create a list of all classes, then get uniques
+        # sum(lists, []) is list concatenation
+        all_classes = np.unique(sum([list(np.unique(d)) for d in y], []))
         # +1 to include endpoint
         output_size = len(np.arange(lowest_class, highest_class + 1))
         X_sym = T.matrix('x')
@@ -1261,20 +1304,23 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         if not hasattr(self, 'fit_function'):
             self._setup_functions(X_sym, y_sym,
                                   self.layer_sizes_)
+        cost, y_hat = self.fit_function(X[0], y[0])
+        from IPython import embed; embed()
+        raise ValueError()
         self.training_loss_ = []
         if valid_X is not None:
-            valid_X, valid_y = rnn_check_array(valid_X, valid_y)
+            if self.input_checking:
+                valid_X, valid_y = rnn_check_array(valid_X, valid_y)
             self.validation_loss_ = []
-            if self.cost == "ctc":
-                # Need to insert blanks at start, end, and between each label
-                # See A. Graves "Supervised Sequence Labelling with
-                # Recurrent Neural Networks" figure 7.2 (pg. 58)
-                # (http://www.cs.toronto.edu/~graves/preprint.pdf)
-                y_fixed = [blank * np.ones(2 * yi.shape[0] + 1).astype('int32')
-                           for yi in valid_y]
-                for i, yi in enumerate(valid_y):
-                    y_fixed[i][1:-1:2] = yi
-                valid_y = y_fixed
+            if self.input_checking:
+                if self.cost == "ctc":
+                    valid_y = _make_ctc_labels(valid_y)
+                for vy in valid_y:
+                    if not np.in1d(np.unique(vy), all_classes).all():
+                        raise ValueError(
+                            "Validation set contains classes not in training"
+                            "set! Training set classes: %s\n, Validation set \
+                            classes: %s"% (all_classes, np.unique(vy)))
 
         best_valid_loss = np.inf
         for itr in range(self.max_iter):

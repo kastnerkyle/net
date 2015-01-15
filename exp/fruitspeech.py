@@ -18,6 +18,7 @@ for n, t in enumerate(train_x):
 
 for n, v in enumerate(valid_x):
     valid_x[n] = (v - means) / std
+
 clf.fit(train_x, train_y, valid_x, valid_y)
 y_hat = labels_to_chars(clf.predict(valid_x[0])[0])
 y = labels_to_chars(valid_y[0])
