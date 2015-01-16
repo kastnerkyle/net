@@ -613,7 +613,7 @@ def load_librispeech():
     return rval
 
 
-class BaseMinet(object):
+class BaseNet(object):
     def __getstate__(self):
         if not hasattr(self, '_pickle_skip_list'):
             self._pickle_skip_list = []
@@ -811,7 +811,7 @@ def softmax_cost(y_hat_sym, y_sym):
     return -T.mean(T.log(y_hat_sym)[T.arange(y_sym.shape[0]), y_sym])
 
 
-class FeedforwardNetwork(BaseMinet, TrainingMixin):
+class FeedforwardNetwork(BaseNet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[500], batch_size=100, max_iter=1E3,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
                  activation="tanh", model_save_name="saved_model",
@@ -1116,18 +1116,11 @@ def log_ctc_cost(y_hat_sym, y_sym):
         y_hat_sym[::-1], y_sym[::-1])[::-1, ::-1]
     log_probs = log_forward_probs + log_backward_probs - _epslog(
         y_hat_sym[:, y_sym])
-
-    def logadd(log_a, log_b):
-        return log_a + T.log(1. + T.exp(log_b - log_a))
-
     log_probs = log_probs.flatten()
-    log_total_probs, _ = theano.scan(
-        logadd,
-        sequences=[log_probs[1:]],
-        # log of 1
-        outputs_info=[log_probs[0]]
-    )
-    return -T.sum(log_total_probs[-1])
+    max_log = T.max(log_probs)
+    # Stable logsumexp
+    loss = max_log + T.log(T.sum(T.exp(log_probs - max_log)))
+    return -loss
 
 
 def rnn_check_array(X, y=None):
@@ -1167,7 +1160,7 @@ def rnn_check_array(X, y=None):
         return X
 
 
-class RecurrentNetwork(BaseMinet, TrainingMixin):
+class RecurrentNetwork(BaseNet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
                  recurrent_activation="tanh", max_col_norm=1.9365,
@@ -1267,7 +1260,7 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
                              % self.learning_alg)
 
         self.fit_function = theano.function(inputs=[X_sym, y_sym],
-                                            outputs=[cost, y_hat_sym],
+                                            outputs=cost,
                                             updates=updates)
 
         self.loss_function = theano.function(inputs=[X_sym, y_sym],
@@ -1304,9 +1297,6 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
         if not hasattr(self, 'fit_function'):
             self._setup_functions(X_sym, y_sym,
                                   self.layer_sizes_)
-        cost, y_hat = self.fit_function(X[0], y[0])
-        from IPython import embed; embed()
-        raise ValueError()
         self.training_loss_ = []
         if valid_X is not None:
             if self.input_checking:
@@ -1320,7 +1310,7 @@ class RecurrentNetwork(BaseMinet, TrainingMixin):
                         raise ValueError(
                             "Validation set contains classes not in training"
                             "set! Training set classes: %s\n, Validation set \
-                            classes: %s"% (all_classes, np.unique(vy)))
+                             classes: %s" % (all_classes, np.unique(vy)))
 
         best_valid_loss = np.inf
         for itr in range(self.max_iter):
