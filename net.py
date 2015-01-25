@@ -80,7 +80,7 @@ def shared_zeros(shape):
 
 def shared_rand(shape, rng):
     """ Builds a theano shared variable filled with random values """
-    return theano.shared(value=(rng.rand(*shape) - 0.5).astype(
+    return theano.shared(value=(0.01 * (rng.rand(*shape) - 0.5)).astype(
         theano.config.floatX), borrow=True)
 
 
@@ -1218,23 +1218,39 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                 backward_hidden, backward_params = self.recurrent_function(
                     input_size, hidden_size, output_size, input_variable[::-1],
                     self.random_state)
-                Wfo = shared_rand((hidden_size, output_size), self.random_state)
-                Wbo = shared_rand((hidden_size, output_size), self.random_state)
-                by = shared_zeros((output_size,))
-                params = forward_params + backward_params + [Wfo, Wbo, by]
-                input_variable = T.dot(forward_hidden, Wfo) + T.dot(
-                    backward_hidden, Wbo) + by
+                #Wfo = shared_rand((hidden_size, output_size), self.random_state)
+                #Wbo = shared_rand((hidden_size, output_size), self.random_state)
+                #by = shared_zeros((output_size,))
+                #params = forward_params + backward_params + [Wfo, Wbo, by]
+                #input_variable = T.dot(forward_hidden, Wfo) + T.dot(
+                #    backward_hidden, Wbo) + by
+                params = forward_params + backward_params
+                input_variable = T.concatenate(
+                    [forward_hidden, backward_hidden[::-1]],
+                    axis=forward_hidden.ndim - 1)
             else:
-                Wo = shared_rand((hidden_size, output_size), self.random_state)
-                bo = shared_zeros((output_size,))
-                params = forward_params + [Wo, bo]
-                input_variable = T.dot(forward_hidden, Wo) + bo
+                #Wo = shared_rand((hidden_size, output_size), self.random_state)
+                #bo = shared_zeros((output_size,))
+                #params = forward_params + [Wo, bo]
+                #input_variable = T.dot(forward_hidden, Wo) + bo
+                params = forward_params
+                input_variable = forward_hidden
 
         # T.nnet.softmax doesn't define a gradient? wut
-        # y_hat_sym = T.nnet.softmax(input_variable)
+        #y_hat_sym = T.nnet.softmax(input_variable)
         # We can replace it with the mathematical expression and Theano will fix
-        y_hat_sym = T.exp(input_variable) / T.exp(input_variable).sum(
-            1, keepdims=True)
+        #y_hat_sym = T.exp(input_variable) / T.exp(input_variable).sum(
+        #    1, keepdims=True)
+        if self.bidirectional:
+            sz = 2 * hidden_sizes[-1]
+        else:
+            sz = hidden_sizes[-1]
+        Wo = shared_rand((sz, output_size),
+                            self.random_state)
+        bo = shared_zeros((output_size,))
+        params = params + [Wo, bo]
+        input_variable = T.dot(input_variable, Wo) + bo
+        y_hat_sym = T.nnet.softmax(input_variable)
 
         if self.cost == "ctc":
             cost = log_ctc_cost(y_hat_sym, y_sym)
