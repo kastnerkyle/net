@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 # https://github.com/mohammadpz/Recurrent-Neural-Networks
 
 n_u = 2
+n_h = 6
 n_y = 3
 time_steps = 10
 n_seq = 100
@@ -19,7 +20,7 @@ thresh = 0.5
 targets[:, 2:][seq[:, 1:-1, 1] > seq[:, :-2, 0] + thresh] = 1
 targets[:, 2:][seq[:, 1:-1, 1] < seq[:, :-2, 0] - thresh] = 2
 
-clf = RecurrentNetwork(learning_alg="sgd", hidden_layer_sizes=[6, 6],
+clf = RecurrentNetwork(learning_alg="sgd", hidden_layer_sizes=[n_h, n_h],
                        max_iter=1E3, cost="softmax", learning_rate=0.1,
                        momentum=0.99, recurrent_activation="lstm",
                        random_seed=1999)

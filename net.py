@@ -84,6 +84,22 @@ def shared_rand(shape, rng):
         theano.config.floatX), borrow=True)
 
 
+def np_rand(shape, rng):
+    return (0.01 * (rng.rand(*shape) - 0.5)).astype(theano.config.floatX)
+
+
+def np_randn(shape, rng, name=None):
+    """ Builds a numpy variable filled with random normal values """
+    return (0.01 * rng.randn(*shape)).astype(theano.config.floatX)
+
+
+def np_ortho(shape, rng, name=None):
+    """ Builds a theano variable filled with orthonormal random values """
+    g = rng.randn(*shape)
+    o_g = linalg.svd(g)[0]
+    return o_g.astype(theano.config.floatX)
+
+
 def shared_ortho(shape, rng, name=None):
     """ Builds a theano shared variable filled with random values """
     g = rng.randn(*shape)
@@ -982,69 +998,76 @@ def build_recurrent_relu_layer(input_size, hidden_size, output_size,
     return hidden, params
 
 
-def _recurrent_lstm_init(input_size, hidden_size, output_size, random_state):
-    h0 = shared_zeros((hidden_size,))
-    c0 = shared_zeros((hidden_size,))
+def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
+                               input_variable, random_state, debug_step=False):
+    # input to LSTM
+    W_ = np.concatenate(
+        [np_rand((input_size, hidden_size), random_state),
+         np_rand((input_size, hidden_size), random_state),
+         np_rand((input_size, hidden_size), random_state),
+         np_rand((input_size, hidden_size), random_state)],
+        axis=1)
 
-    # Input gate weights
-    wxig = shared_rand((hidden_size, input_size), random_state)
-    whig = shared_ortho((hidden_size, hidden_size), random_state)
-    wcig = shared_ortho((hidden_size, hidden_size), random_state)
+    W = theano.shared(W_, borrow=True)
 
-    # Forget gate weights
-    wxfg = shared_rand((hidden_size, input_size), random_state)
-    whfg = shared_ortho((hidden_size, hidden_size), random_state)
-    wcfg = shared_ortho((hidden_size, hidden_size), random_state)
+    # LSTM to LSTM
+    U_ = np.concatenate(
+        [np_ortho((hidden_size, hidden_size), random_state),
+         np_ortho((hidden_size, hidden_size), random_state),
+         np_ortho((hidden_size, hidden_size), random_state),
+         np_ortho((hidden_size, hidden_size), random_state)],
+        axis=1)
 
-    # Output gate weights
-    wxog = shared_rand((hidden_size, input_size), random_state)
-    whog = shared_ortho((hidden_size, hidden_size), random_state)
-    wcog = shared_ortho((hidden_size, hidden_size), random_state)
+    U = theano.shared(U_, borrow=True)
 
-    # Cell weights
-    wxc = shared_rand((hidden_size, input_size), random_state)
-    whc = shared_ortho((hidden_size, hidden_size), random_state)
+    # bias to LSTM
+    b = shared_zeros((4 * hidden_size,))
 
-    # Input gate bias
-    big = shared_zeros((hidden_size,))
+    # TODO: Ilya init for biases...
+    params = [W, U, b]
 
-    # Forget gate bias
-    bfg = shared_zeros((hidden_size,))
+    n_steps = input_variable.shape[0]
+    n_features = input_variable.shape[1]
 
-    # Output gate bias
-    bog = shared_zeros((hidden_size,))
-
-    # Cell bias
-    bc = shared_zeros((hidden_size,))
-
-    params = [wxig, whig, wcig,
-              wxfg, whfg, wcfg,
-              wxog, whog, wcog,
-              wxc, whc, big, bfg, bog, bc,
-              h0, c0]
+    def _slice(X, n, hidden_size):
+        # Function is needed because tensor size changes across calls to step?
+        if X.ndim == 3:
+            return X[:, :, n * hidden_size:(n + 1) * hidden_size]
+        return X[:, n * hidden_size:(n + 1) * hidden_size]
 
     def step(x_t, h_tm1, c_tm1):
-        i_t = T.nnet.sigmoid(T.dot(wxig, x_t) + T.dot(whig, h_tm1) +
-                             T.dot(wcig, c_tm1) + big)
-        f_t = T.nnet.sigmoid(T.dot(wxfg, x_t) + T.dot(whfg, h_tm1) +
-                             T.dot(wcfg, c_tm1) + bfg)
-        c_t = f_t * c_tm1 + i_t * T.tanh(T.dot(wxc, x_t) +
-                                         T.dot(whc, h_tm1) + bc)
-        o_t = T.nnet.sigmoid(T.dot(wxog, x_t) + T.dot(whog, h_tm1) +
-                             T.dot(wcog, c_t) + bog)
+        preactivation = T.dot(h_tm1, U)
+        preactivation += x_t
+        preactivation += b
+
+        i_t = T.nnet.sigmoid(_slice(preactivation, 0, hidden_size))
+        f_t = T.nnet.sigmoid(_slice(preactivation, 1, hidden_size))
+        o_t = T.nnet.sigmoid(_slice(preactivation, 2, hidden_size))
+        c_t = T.tanh(_slice(preactivation, 3, hidden_size))
+
+        c_t = f_t * c_tm1 + i_t * c_t
         h_t = o_t * T.tanh(c_t)
-        return h_t, c_t
+        return h_t, c_t, i_t, f_t, o_t, preactivation
 
-    return step, params, [h0, c0]
+    # Scan cannot handle batch sizes of 1?
+    # Unbroadcast can fix it... but still weird
+    #https://github.com/Theano/Theano/issues/1772
+    init_hidden = T.zeros((1, hidden_size))
+    init_hidden = T.unbroadcast(init_hidden, 0)
+    init_cell = T.zeros((1, hidden_size))
+    init_cell = T.unbroadcast(init_cell, 0)
 
+    x = T.dot(input_variable, W) + b
+    if debug_step:
+        rval = step(x, init_hidden, init_cell)
+    else:
+        rval, _ = theano.scan(step,
+                              sequences=[x,],
+                              outputs_info=[init_hidden, init_cell,
+                                            None, None, None, None],
+                              n_steps=n_steps)
 
-def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
-                               input_variable, random_state):
-    step, params, outputs = _recurrent_lstm_init(input_size, hidden_size,
-                                                 output_size, random_state)
-    [hidden, cell], _ = theano.scan(step,
-                                    sequences=[input_variable],
-                                    outputs_info=outputs)
+    hidden = rval[0]
     return hidden, params
 
 
@@ -1250,6 +1273,8 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         bo = shared_zeros((output_size,))
         params = params + [Wo, bo]
         input_variable = T.dot(input_variable, Wo) + bo
+        shp = input_variable.shape
+        input_variable = input_variable.reshape([shp[0] * shp[1], shp[2]])
         y_hat_sym = T.nnet.softmax(input_variable)
 
         if self.cost == "ctc":
@@ -1306,6 +1331,8 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         output_size = len(np.arange(lowest_class, highest_class + 1))
         X_sym = T.matrix('x')
         y_sym = T.ivector('y')
+        #X_sym = T.tensor3('x')
+        #y_sym = T.imatrix('y')
         self.layers_ = []
         self.layer_sizes_ = [input_size]
         self.layer_sizes_.extend(self.hidden_layer_sizes)
@@ -1333,7 +1360,9 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             print("Starting pass %d through the dataset" % itr)
             total_train_loss = 0
             for n in range(len(X)):
-                train_loss = self.fit_function(X[n], y[n])
+                X_n = X[n]
+                y_n = y[n]
+                train_loss = self.fit_function(X_n, y_n)
                 total_train_loss += train_loss
             current_train_loss = total_train_loss / len(X)
             print("Training loss %f" % current_train_loss)

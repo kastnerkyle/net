@@ -3,9 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 (train_x, train_y), (valid_x, valid_y), (test_x, test_y) = load_librispeech()
-clf = RecurrentNetwork(learning_alg="rmsprop", hidden_layer_sizes=[1000, 1000, 1000, 1000, 1000],
+clf = RecurrentNetwork(learning_alg="rmsprop", hidden_layer_sizes=[500,],
                        max_iter=100, cost="ctc", bidirectional=True,
-                       learning_rate=0.00002, momentum=0.9,
+                       learning_rate=0.0001, momentum=0.9,
                        recurrent_activation="lstm",
                        random_seed=1999)
 print(labels_to_chars(train_y[2]))
