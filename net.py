@@ -680,7 +680,7 @@ class TrainingMixin(object):
         return new_param, new_update_step
 
     def get_clip_sgd_updates(self, X_sym, y_sym, params, cost, learning_rate,
-                             momentum, max_col_norm):
+                             momentum, max_col_norm, rescale=5.):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
 
@@ -691,8 +691,8 @@ class TrainingMixin(object):
         grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(), gparams)))
         not_finite = T.or_(T.isnan(grad_norm), T.isinf(grad_norm))
         grad_norm = T.sqrt(grad_norm)
-        scaling_num = 1.
-        scaling_den = T.maximum(1., grad_norm)
+        scaling_num = rescale
+        scaling_den = T.maximum(rescale, grad_norm)
         for n, (param, gparam) in enumerate(zip(params, gparams)):
             # clip gradient directly, not momentum etc.
             gparam = T.switch(not_finite, 0.1 * param,
@@ -704,7 +704,7 @@ class TrainingMixin(object):
         return updates
 
     def get_clip_rmsprop_updates(self, X_sym, y_sym, params, cost,
-                                 learning_rate, momentum, max_col_norm):
+                                 learning_rate, momentum, rescale=5.):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
 
@@ -720,8 +720,8 @@ class TrainingMixin(object):
         grad_norm = T.sqrt(sum(map(lambda x: T.sqr(x).sum(), gparams)))
         not_finite = T.or_(T.isnan(grad_norm), T.isinf(grad_norm))
         grad_norm = T.sqrt(grad_norm)
-        scaling_num = 1.
-        scaling_den = T.maximum(1., grad_norm)
+        scaling_num = rescale
+        scaling_den = T.maximum(rescale, grad_norm)
         for n, (param, gparam) in enumerate(zip(params, gparams)):
             gparam = T.switch(not_finite, 0.1 * param,
                               gparam * (scaling_num / scaling_den))
@@ -742,9 +742,7 @@ class TrainingMixin(object):
             self.running_avg_[n] = new_avg
             self.updates_storage_[n] = update_step
             self.momentum_velocity_[n] = update_step
-            new_param, new_update_step = self._norm_constraint(
-                param, update_step, max_col_norm)
-            updates[param] = new_param + new_update_step
+            updates[param] = param + update_step
 
         return updates
 
@@ -827,6 +825,7 @@ def softmax_cost(y_hat_sym, y_sym):
     return -T.mean(T.log(y_hat_sym)[T.arange(y_sym.shape[0]), y_sym])
 
 
+"""
 class FeedforwardNetwork(BaseNet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[500], batch_size=100, max_iter=1E3,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
@@ -942,60 +941,7 @@ class FeedforwardNetwork(BaseNet, TrainingMixin):
 
     def predict(self, X):
         return np.argmax(self.predict_function(X), axis=1)
-
-
-def _recurrent_tanh_init(input_size, hidden_size, output_size, random_state):
-    wih = shared_rand((input_size, hidden_size), random_state)
-    whh = shared_ortho((hidden_size, hidden_size), random_state)
-    bh = shared_zeros((hidden_size,))
-    h0 = shared_zeros((hidden_size,))
-    params = [wih, bh, whh, h0]
-
-    def step(x_t, h_tm1):
-        h_t = T.tanh(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
-        return h_t
-
-    return step, params, [h0]
-
-
-def build_recurrent_tanh_layer(input_size, hidden_size, output_size,
-                               input_variable, random_state):
-    step, params, outputs = _recurrent_tanh_init(input_size, hidden_size,
-                                                 output_size, random_state)
-
-    hidden, _ = theano.scan(
-        step,
-        sequences=[input_variable],
-        outputs_info=outputs
-    )
-    return hidden, params
-
-
-def _recurrent_relu_init(input_size, hidden_size, output_size, random_state):
-    wih = shared_rand((input_size, hidden_size), random_state)
-    whh = shared_ortho((hidden_size, hidden_size), random_state)
-    bh = shared_zeros((hidden_size,))
-    h0 = shared_zeros((hidden_size,))
-    params = [wih, bh, whh, h0]
-
-    def step(x_t, h_tm1):
-        h_t = clip_relu(T.dot(h_tm1, whh) + T.dot(x_t, wih) + bh)
-        return h_t
-
-    return step, params, [h0]
-
-
-def build_recurrent_relu_layer(input_size, hidden_size, output_size,
-                               input_variable, random_state):
-
-    step, params, outputs = _recurrent_relu_init(input_size, hidden_size,
-                                                 output_size, random_state)
-    hidden, _ = theano.scan(
-        step,
-        sequences=[input_variable],
-        outputs_info=outputs
-    )
-    return hidden, params
+"""
 
 
 def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
@@ -1027,8 +973,7 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
     params = [W, U, b]
 
     n_steps = input_variable.shape[0]
-    #n_samples = input_variable.shape[1]
-    n_samples = 1
+    n_samples = input_variable.shape[1]
     n_features = input_variable.shape[2]
 
     def _slice(X, n, hidden_size):
@@ -1228,7 +1173,11 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             if (n - 1) < 0:
                 input_size = layer_sizes[0]
             else:
-                input_size = output_size
+                if self.bidirectional:
+                    # Accomodate for concatenated hiddens
+                    input_size = 2 * output_size
+                else:
+                    input_size = output_size
             hidden_size = hidden_sizes[n]
             if (n + 1) != len(hidden_sizes):
                 output_size = hidden_sizes[n + 1]
@@ -1243,30 +1192,16 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                 backward_hidden, backward_params = self.recurrent_function(
                     input_size, hidden_size, output_size, input_variable[::-1],
                     self.random_state)
-                #Wfo = shared_rand((hidden_size, output_size), self.random_state)
-                #Wbo = shared_rand((hidden_size, output_size), self.random_state)
-                #by = shared_zeros((output_size,))
-                #params = forward_params + backward_params + [Wfo, Wbo, by]
-                #input_variable = T.dot(forward_hidden, Wfo) + T.dot(
-                #    backward_hidden, Wbo) + by
                 params = forward_params + backward_params
                 input_variable = T.concatenate(
                     [forward_hidden, backward_hidden[::-1]],
                     axis=forward_hidden.ndim - 1)
             else:
-                #Wo = shared_rand((hidden_size, output_size), self.random_state)
-                #bo = shared_zeros((output_size,))
-                #params = forward_params + [Wo, bo]
-                #input_variable = T.dot(forward_hidden, Wo) + bo
                 params = forward_params
                 input_variable = forward_hidden
 
-        # T.nnet.softmax doesn't define a gradient? wut
-        #y_hat_sym = T.nnet.softmax(input_variable)
-        # We can replace it with the mathematical expression and Theano will fix
-        #y_hat_sym = T.exp(input_variable) / T.exp(input_variable).sum(
-        #    1, keepdims=True)
         if self.bidirectional:
+            # Accomodate for concatenated hiddens
             sz = 2 * hidden_sizes[-1]
         else:
             sz = hidden_sizes[-1]
@@ -1279,9 +1214,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         input_variable = input_variable.reshape([shp[0] * shp[1], shp[2]])
         y_hat_sym = T.nnet.softmax(input_variable)
 
-        if self.cost == "ctc":
-            cost = log_ctc_cost(y_hat_sym, y_sym)
-        elif self.cost == "softmax":
+        if self.cost == "softmax":
             cost = -T.mean(T.log(y_hat_sym)[T.arange(y_sym.shape[0]),
                                             y_sym.T])
 
@@ -1304,8 +1237,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                              % self.learning_alg)
 
         self.fit_function = theano.function(inputs=[X_sym, y_sym],
-                                            outputs=[y_sym, y_hat_sym, cost],
-                                            #outputs=cost,
+                                            outputs=cost,
                                             updates=updates)
 
         self.loss_function = theano.function(inputs=[X_sym, y_sym],
@@ -1324,10 +1256,6 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         lowest_class = np.min([np.min(d) for d in y])
         if lowest_class != 0:
             raise ValueError("Labels must start from 0!")
-        if self.cost == "ctc":
-            if self.input_checking:
-                y = _make_ctc_labels(y)
-            highest_class = np.max([np.max(d) for d in y])
         # Create a list of all classes, then get uniques
         # sum(lists, []) is list concatenation
         all_classes = np.unique(sum([list(np.unique(d)) for d in y], []))
@@ -1348,8 +1276,6 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                 valid_X, valid_y = rnn_check_array(valid_X, valid_y)
             self.validation_loss_ = []
             if self.input_checking:
-                if self.cost == "ctc":
-                    valid_y = _make_ctc_labels(valid_y)
                 for vy in valid_y:
                     if not np.in1d(np.unique(vy), all_classes).all():
                         raise ValueError(
@@ -1362,11 +1288,9 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             print("Starting pass %d through the dataset" % itr)
             total_train_loss = 0
             for n in range(len(X)):
-                #X_n = X[n]
-                #y_n = y[n]
                 X_n = X[n][None].transpose(1, 0, 2)
                 y_n = y[n][None].transpose(1, 0)
-                yt, yt_hat, train_loss = self.fit_function(X_n, y_n)
+                train_loss = self.fit_function(X_n, y_n)
                 total_train_loss += train_loss
             current_train_loss = total_train_loss / len(X)
             print("Training loss %f" % current_train_loss)
@@ -1380,7 +1304,9 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             if valid_X is not None:
                 total_valid_loss = 0
                 for n in range(len(valid_X)):
-                    valid_loss = self.loss_function(valid_X[n], valid_y[n])
+                    valid_X_n = valid_X[n][None].transpose(1, 0, 2)
+                    valid_y_n = valid_y[n][None].transpose(1, 0)
+                    valid_loss = self.loss_function(valid_X_n, valid_y_n)
                     total_valid_loss += valid_loss
                 current_valid_loss = total_valid_loss / len(valid_X)
                 print("Validation loss %f" % current_valid_loss)
@@ -1394,17 +1320,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
     def predict(self, X):
         X = rnn_check_array(X)
         predictions = []
-        if self.cost == "ctc":
-            blank_pred = self.layer_sizes_[-1] - 1
-            for n in range(len(X)):
-                pred = np.argmax(self.predict_function(X[n])[0], axis=1)
-                out = []
-                for n, p in enumerate(pred):
-                    if (p != blank_pred) and (n == 0 or p != pred[n-1]):
-                        out.append(p)
-                predictions.append(np.array(out))
-            return predictions
-        elif self.cost == "softmax":
+        if self.cost == "softmax":
             for n in range(len(X)):
                 pred = np.argmax(self.predict_function(X[n])[0], axis=1)
                 predictions.append(pred)
