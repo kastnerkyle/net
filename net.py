@@ -1027,7 +1027,9 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
     params = [W, U, b]
 
     n_steps = input_variable.shape[0]
-    n_features = input_variable.shape[1]
+    #n_samples = input_variable.shape[1]
+    n_samples = 1
+    n_features = input_variable.shape[2]
 
     def _slice(X, n, hidden_size):
         # Function is needed because tensor size changes across calls to step?
@@ -1052,9 +1054,9 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
     # Scan cannot handle batch sizes of 1?
     # Unbroadcast can fix it... but still weird
     #https://github.com/Theano/Theano/issues/1772
-    init_hidden = T.zeros((1, hidden_size))
+    init_hidden = T.zeros((n_samples, hidden_size))
+    init_cell = T.zeros((n_samples, hidden_size))
     init_hidden = T.unbroadcast(init_hidden, 0)
-    init_cell = T.zeros((1, hidden_size))
     init_cell = T.unbroadcast(init_cell, 0)
 
     x = T.dot(input_variable, W) + b
@@ -1269,7 +1271,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         else:
             sz = hidden_sizes[-1]
         Wo = shared_rand((sz, output_size),
-                            self.random_state)
+                         self.random_state)
         bo = shared_zeros((output_size,))
         params = params + [Wo, bo]
         input_variable = T.dot(input_variable, Wo) + bo
@@ -1280,7 +1282,8 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         if self.cost == "ctc":
             cost = log_ctc_cost(y_hat_sym, y_sym)
         elif self.cost == "softmax":
-            cost = softmax_cost(y_hat_sym, y_sym)
+            cost = -T.mean(T.log(y_hat_sym)[T.arange(y_sym.shape[0]),
+                                            y_sym.T])
 
         self.params_ = params
 
@@ -1301,7 +1304,8 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                              % self.learning_alg)
 
         self.fit_function = theano.function(inputs=[X_sym, y_sym],
-                                            outputs=cost,
+                                            outputs=[y_sym, y_hat_sym, cost],
+                                            #outputs=cost,
                                             updates=updates)
 
         self.loss_function = theano.function(inputs=[X_sym, y_sym],
@@ -1329,10 +1333,8 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         all_classes = np.unique(sum([list(np.unique(d)) for d in y], []))
         # +1 to include endpoint
         output_size = len(np.arange(lowest_class, highest_class + 1))
-        X_sym = T.matrix('x')
-        y_sym = T.ivector('y')
-        #X_sym = T.tensor3('x')
-        #y_sym = T.imatrix('y')
+        X_sym = T.tensor3('x')
+        y_sym = T.imatrix('y')
         self.layers_ = []
         self.layer_sizes_ = [input_size]
         self.layer_sizes_.extend(self.hidden_layer_sizes)
@@ -1360,9 +1362,11 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             print("Starting pass %d through the dataset" % itr)
             total_train_loss = 0
             for n in range(len(X)):
-                X_n = X[n]
-                y_n = y[n]
-                train_loss = self.fit_function(X_n, y_n)
+                #X_n = X[n]
+                #y_n = y[n]
+                X_n = X[n][None].transpose(1, 0, 2)
+                y_n = y[n][None].transpose(1, 0)
+                yt, yt_hat, train_loss = self.fit_function(X_n, y_n)
                 total_train_loss += train_loss
             current_train_loss = total_train_loss / len(X)
             print("Training loss %f" % current_train_loss)
