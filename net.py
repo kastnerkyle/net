@@ -27,6 +27,41 @@ import fnmatch
 from theano.tensor.shared_randomstreams import RandomStreams
 
 
+def concatenate(tensor_list, axis=0):
+    """
+    Alternative implementation of `theano.tensor.concatenate`.
+    This function does exactly the same thing, but contrary to Theano's own
+    implementation, the gradient is implemented on the GPU.
+    Stolen from Lasagne
+    """
+    if axis < 0:
+        axis += tensor_list[0].ndim
+
+    concat_size = sum(tensor.shape[axis] for tensor in tensor_list)
+
+    output_shape = ()
+    for k in range(axis):
+        output_shape += (tensor_list[0].shape[k],)
+    output_shape += (concat_size,)
+    for k in range(axis + 1, tensor_list[0].ndim):
+        output_shape += (tensor_list[0].shape[k],)
+
+    out = T.zeros(output_shape)
+    offset = 0
+    for tensor in tensor_list:
+        indices = ()
+        for k in range(axis):
+            indices += (slice(None),)
+        indices += (slice(offset, offset + tensor.shape[axis]),)
+        for k in range(axis + 1, tensor_list[0].ndim):
+            indices += (slice(None),)
+
+        out = T.set_subtensor(out[indices], tensor)
+        offset += tensor.shape[axis]
+
+    return out
+
+
 def minibatch_indices(X, minibatch_size):
     minibatch_indices = np.arange(0, len(X), minibatch_size)
     minibatch_indices = np.asarray(list(minibatch_indices) + [len(X)])
@@ -1222,7 +1257,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                     input_size, hidden_size, output_size, input_variable[::-1],
                     mask[::-1], self.random_state)
                 params = forward_params + backward_params
-                input_variable = T.concatenate(
+                input_variable = concatenate(
                     [forward_hidden, backward_hidden[::-1]],
                     axis=forward_hidden.ndim - 1)
             else:
