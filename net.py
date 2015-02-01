@@ -680,7 +680,7 @@ class TrainingMixin(object):
         return new_param, new_update_step
 
     def get_clip_sgd_updates(self, X_sym, y_sym, params, cost, learning_rate,
-                             momentum, max_col_norm, rescale=5.):
+                             momentum, rescale=5.):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
 
@@ -747,7 +747,7 @@ class TrainingMixin(object):
         return updates
 
     def get_sfg_updates(self, X_sym, y_sym, params, cost,
-                        learning_rate, momentum, max_col_norm):
+                        learning_rate, momentum):
         gparams = T.grad(cost, params)
         updates = OrderedDict()
         from sfg import SFG
@@ -1133,8 +1133,8 @@ def rnn_check_array(X, y=None):
 class RecurrentNetwork(BaseNet, TrainingMixin):
     def __init__(self, hidden_layer_sizes=[100], max_iter=1E2,
                  learning_rate=0.01, momentum=0., learning_alg="sgd",
-                 recurrent_activation="tanh", max_col_norm=1.9365,
-                 bidirectional=False, cost="ctc", save_frequency=10,
+                 recurrent_activation="lstm", minibatch_size=1,
+                 bidirectional=False, cost="softmax", save_frequency=10,
                  model_save_name="saved_model", random_seed=None,
                  input_checking=True):
         if random_seed is None or type(random_seed) is int:
@@ -1144,18 +1144,14 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         self.momentum = momentum
         self.bidirectional = bidirectional
         self.cost = cost
-        self.max_col_norm = max_col_norm
         self.hidden_layer_sizes = hidden_layer_sizes
         self.max_iter = int(max_iter)
+        self.minibatch_size = minibatch_size
         self.save_frequency = save_frequency
         self.model_save_name = model_save_name
         self.recurrent_activation = recurrent_activation
         self.input_checking = input_checking
-        if recurrent_activation == "tanh":
-            self.recurrent_function = build_recurrent_tanh_layer
-        elif recurrent_activation == "relu":
-            self.recurrent_function = build_recurrent_relu_layer
-        elif recurrent_activation == "lstm":
+        if recurrent_activation == "lstm":
             self.recurrent_function = build_recurrent_lstm_layer
         else:
             raise ValueError("Value %s not understood for recurrent_activation"
@@ -1222,16 +1218,13 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
 
         if self.learning_alg == "sgd":
             updates = self.get_clip_sgd_updates(
-                X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
-                self.max_col_norm)
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
         elif self.learning_alg == "rmsprop":
             updates = self.get_clip_rmsprop_updates(
-                X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
-                self.max_col_norm)
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
         elif self.learning_alg == "sfg":
             updates = self.get_sfg_updates(
-                X_sym, y_sym, params, cost, self.learning_rate, self.momentum,
-                self.max_col_norm)
+                X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
                              % self.learning_alg)
@@ -1287,9 +1280,30 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         for itr in range(self.max_iter):
             print("Starting pass %d through the dataset" % itr)
             total_train_loss = 0
-            for n in range(len(X)):
-                X_n = X[n][None].transpose(1, 0, 2)
-                y_n = y[n][None].transpose(1, 0)
+            minibatch_size = self.minibatch_size
+            minibatch_indices = np.arange(0, len(X), minibatch_size)
+            minibatch_indices = np.asarray(list(minibatch_indices) + [len(X)])
+            start_indices = minibatch_indices[:-1]
+            end_indices = minibatch_indices[1:]
+            for i, j in zip(start_indices, end_indices):
+                Xs = X[i:j]
+                ys = y[i:j]
+                X_max_sizes = np.max([xi.shape for xi in Xs], axis=0)
+                X_max_sizes = np.asarray([minibatch_size] + list(X_max_sizes))
+                # Order into time, samples, feature
+                X_max_sizes = np.array([X_max_sizes[1], X_max_sizes[0],
+                                        X_max_sizes[2]])
+                y_max_sizes = np.max([yi.shape for yi in ys], axis=0)
+                y_max_sizes = np.array([minibatch_size] + list(y_max_sizes))
+                # Order into time, label
+                y_max_sizes = np.array([y_max_sizes[1], y_max_sizes[0]])
+                X_n = np.zeros(X_max_sizes, dtype=Xs[0].dtype)
+                y_n = np.zeros(y_max_sizes, dtype=ys[0].dtype)
+                for n, t in enumerate(Xs):
+                    xshp = Xs[n].shape
+                    yshp = ys[n].shape
+                    X_n[:xshp[0], n, :xshp[1]] = Xs[n]
+                    y_n[:yshp[0], n] = ys[n]
                 train_loss = self.fit_function(X_n, y_n)
                 total_train_loss += train_loss
             current_train_loss = total_train_loss / len(X)
@@ -1322,7 +1336,8 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         predictions = []
         if self.cost == "softmax":
             for n in range(len(X)):
-                pred = np.argmax(self.predict_function(X[n])[0], axis=1)
+                X_n = X[n][None].transpose(1, 0, 2)
+                pred = np.argmax(self.predict_function(X_n)[0], axis=1)
                 predictions.append(pred)
             return predictions
 
@@ -1330,6 +1345,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         X = rnn_check_array(X)
         predictions = []
         for n in range(len(X)):
-            pred = self.predict_function(X[n])[0]
+            X_n = X[n][None].transpose(1, 0, 2)
+            pred = self.predict_function(X_n)[0]
             predictions.append(pred)
         return predictions

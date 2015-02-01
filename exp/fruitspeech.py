@@ -4,7 +4,7 @@ import numpy as np
 
 (train_x, train_y), (valid_x, valid_y), (test_x, test_y) = load_fruitspeech()
 clf = RecurrentNetwork(learning_alg="rmsprop",
-                       hidden_layer_sizes=[500], max_col_norm=.75,
+                       hidden_layer_sizes=[500],
                        max_iter=100, cost="ctc", bidirectional=True,
                        learning_rate=0.00002, momentum=0.9,
                        recurrent_activation="lstm",
