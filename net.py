@@ -22,10 +22,40 @@ from theano.compat.python2x import OrderedDict
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import warnings
 # Sandbox?
 import fnmatch
 from theano.tensor.shared_randomstreams import RandomStreams
+
+
+def minibatch_indices(X, minibatch_size):
+    minibatch_indices = np.arange(0, len(X), minibatch_size)
+    minibatch_indices = np.asarray(list(minibatch_indices) + [len(X)])
+    start_indices = minibatch_indices[:-1]
+    end_indices = minibatch_indices[1:]
+    return zip(start_indices, end_indices)
+
+
+def make_minibatch(X, y):
+    minibatch_size = len(X)
+    X_max_sizes = np.max([xi.shape for xi in X], axis=0)
+    X_max_sizes = np.asarray([minibatch_size] + list(X_max_sizes))
+    # Order into time, samples, feature
+    X_max_sizes = np.array([X_max_sizes[1], X_max_sizes[0],
+                            X_max_sizes[2]])
+    y_max_sizes = np.max([yi.shape for yi in y], axis=0)
+    y_max_sizes = np.array([minibatch_size] + list(y_max_sizes))
+    # Order into time, label
+    y_max_sizes = np.array([y_max_sizes[1], y_max_sizes[0]])
+    X_n = np.zeros(X_max_sizes, dtype=X[0].dtype)
+    y_n = np.zeros(y_max_sizes, dtype=y[0].dtype)
+    mask = np.zeros_like(y_n).astype(theano.config.floatX)
+    for n, t in enumerate(X):
+        xshp = X[n].shape
+        yshp = y[n].shape
+        X_n[:xshp[0], n, :xshp[1]] = X[n]
+        y_n[:yshp[0], n] = y[n]
+        mask[:yshp[0], n] = 1.
+    return X_n, y_n, mask
 
 
 def labels_to_chars(labels):
@@ -945,7 +975,8 @@ class FeedforwardNetwork(BaseNet, TrainingMixin):
 
 
 def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
-                               input_variable, random_state, debug_step=False):
+                               input_variable, mask,
+                               random_state, debug_step=False):
     # input to LSTM
     W_ = np.concatenate(
         [np_rand((input_size, hidden_size), random_state),
@@ -982,7 +1013,7 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
             return X[:, :, n * hidden_size:(n + 1) * hidden_size]
         return X[:, n * hidden_size:(n + 1) * hidden_size]
 
-    def step(x_t, h_tm1, c_tm1):
+    def step(x_t, mask, h_tm1, c_tm1):
         preactivation = T.dot(h_tm1, U)
         preactivation += x_t
         preactivation += b
@@ -993,7 +1024,9 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
         c_t = T.tanh(_slice(preactivation, 3, hidden_size))
 
         c_t = f_t * c_tm1 + i_t * c_t
+        c_t = mask[:, None] * c_t + (1. - mask)[:, None] * c_tm1
         h_t = o_t * T.tanh(c_t)
+        h_t = mask[:, None] * h_t + (1. - mask)[:, None] * h_tm1
         return h_t, c_t, i_t, f_t, o_t, preactivation
 
     # Scan cannot handle batch sizes of 1?
@@ -1009,7 +1042,7 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
         rval = step(x, init_hidden, init_cell)
     else:
         rval, _ = theano.scan(step,
-                              sequences=[x,],
+                              sequences=[x, mask],
                               outputs_info=[init_hidden, init_cell,
                                             None, None, None, None],
                               n_steps=n_steps)
@@ -1157,7 +1190,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             raise ValueError("Value %s not understood for recurrent_activation"
                              % recurrent_activation)
 
-    def _setup_functions(self, X_sym, y_sym, layer_sizes):
+    def _setup_functions(self, X_sym, y_sym, mask, layer_sizes):
         input_variable = X_sym
 
         # layer_sizes consists of input size, all hidden sizes, and output size
@@ -1181,13 +1214,13 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                 output_size = layer_sizes[-1]
 
             forward_hidden, forward_params = self.recurrent_function(
-                input_size, hidden_size, output_size, input_variable,
+                input_size, hidden_size, output_size, input_variable, mask,
                 self.random_state)
 
             if self.bidirectional:
                 backward_hidden, backward_params = self.recurrent_function(
                     input_size, hidden_size, output_size, input_variable[::-1],
-                    self.random_state)
+                    mask[::-1], self.random_state)
                 params = forward_params + backward_params
                 input_variable = T.concatenate(
                     [forward_hidden, backward_hidden[::-1]],
@@ -1222,22 +1255,21 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         elif self.learning_alg == "rmsprop":
             updates = self.get_clip_rmsprop_updates(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
-        elif self.learning_alg == "sfg":
             updates = self.get_sfg_updates(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
         else:
             raise ValueError("Value of %s not a valid learning_alg!"
                              % self.learning_alg)
 
-        self.fit_function = theano.function(inputs=[X_sym, y_sym],
+        self.fit_function = theano.function(inputs=[X_sym, y_sym, mask],
                                             outputs=cost,
                                             updates=updates)
 
-        self.loss_function = theano.function(inputs=[X_sym, y_sym],
+        self.loss_function = theano.function(inputs=[X_sym, y_sym, mask],
                                              outputs=cost)
 
         self.predict_function = theano.function(
-            inputs=[X_sym],
+            inputs=[X_sym, mask],
             outputs=[y_hat_sym],)
 
     def fit(self, X, y, valid_X=None, valid_y=None):
@@ -1256,19 +1288,19 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         output_size = len(np.arange(lowest_class, highest_class + 1))
         X_sym = T.tensor3('x')
         y_sym = T.imatrix('y')
+        mask = T.matrix('mask')
         self.layers_ = []
         self.layer_sizes_ = [input_size]
         self.layer_sizes_.extend(self.hidden_layer_sizes)
         self.layer_sizes_.append(output_size)
         if not hasattr(self, 'fit_function'):
-            self._setup_functions(X_sym, y_sym,
+            self._setup_functions(X_sym, y_sym, mask,
                                   self.layer_sizes_)
         self.training_loss_ = []
         if valid_X is not None:
-            if self.input_checking:
-                valid_X, valid_y = rnn_check_array(valid_X, valid_y)
             self.validation_loss_ = []
             if self.input_checking:
+                valid_X, valid_y = rnn_check_array(valid_X, valid_y)
                 for vy in valid_y:
                     if not np.in1d(np.unique(vy), all_classes).all():
                         raise ValueError(
@@ -1280,31 +1312,9 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         for itr in range(self.max_iter):
             print("Starting pass %d through the dataset" % itr)
             total_train_loss = 0
-            minibatch_size = self.minibatch_size
-            minibatch_indices = np.arange(0, len(X), minibatch_size)
-            minibatch_indices = np.asarray(list(minibatch_indices) + [len(X)])
-            start_indices = minibatch_indices[:-1]
-            end_indices = minibatch_indices[1:]
-            for i, j in zip(start_indices, end_indices):
-                Xs = X[i:j]
-                ys = y[i:j]
-                X_max_sizes = np.max([xi.shape for xi in Xs], axis=0)
-                X_max_sizes = np.asarray([minibatch_size] + list(X_max_sizes))
-                # Order into time, samples, feature
-                X_max_sizes = np.array([X_max_sizes[1], X_max_sizes[0],
-                                        X_max_sizes[2]])
-                y_max_sizes = np.max([yi.shape for yi in ys], axis=0)
-                y_max_sizes = np.array([minibatch_size] + list(y_max_sizes))
-                # Order into time, label
-                y_max_sizes = np.array([y_max_sizes[1], y_max_sizes[0]])
-                X_n = np.zeros(X_max_sizes, dtype=Xs[0].dtype)
-                y_n = np.zeros(y_max_sizes, dtype=ys[0].dtype)
-                for n, t in enumerate(Xs):
-                    xshp = Xs[n].shape
-                    yshp = ys[n].shape
-                    X_n[:xshp[0], n, :xshp[1]] = Xs[n]
-                    y_n[:yshp[0], n] = ys[n]
-                train_loss = self.fit_function(X_n, y_n)
+            for i, j in minibatch_indices(X, self.minibatch_size):
+                X_n, y_n, mask = make_minibatch(X[i:j], y[i:j])
+                train_loss = self.fit_function(X_n, y_n, mask)
                 total_train_loss += train_loss
             current_train_loss = total_train_loss / len(X)
             print("Training loss %f" % current_train_loss)
@@ -1317,10 +1327,10 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
 
             if valid_X is not None:
                 total_valid_loss = 0
-                for n in range(len(valid_X)):
-                    valid_X_n = valid_X[n][None].transpose(1, 0, 2)
-                    valid_y_n = valid_y[n][None].transpose(1, 0)
-                    valid_loss = self.loss_function(valid_X_n, valid_y_n)
+                for i, j in minibatch_indices(X, self.minibatch_size):
+                    valid_X_n, valid_y_n, mask = make_minibatch(valid_X[i:j],
+                                                                valid_y[i:j])
+                    valid_loss = self.loss_function(valid_X_n, valid_y_n, mask)
                     total_valid_loss += valid_loss
                 current_valid_loss = total_valid_loss / len(valid_X)
                 print("Validation loss %f" % current_valid_loss)
@@ -1334,18 +1344,19 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
     def predict(self, X):
         X = rnn_check_array(X)
         predictions = []
-        if self.cost == "softmax":
-            for n in range(len(X)):
-                X_n = X[n][None].transpose(1, 0, 2)
-                pred = np.argmax(self.predict_function(X_n)[0], axis=1)
-                predictions.append(pred)
-            return predictions
+        for n in range(len(X)):
+            X_n = X[n][None].transpose(1, 0, 2)
+            mask = np.ones((len(X_n), 1)).astype(theano.config.floatX)
+            pred = np.argmax(self.predict_function(X_n, mask)[0], axis=1)
+            predictions.append(pred)
+        return predictions
 
     def predict_proba(self, X):
         X = rnn_check_array(X)
         predictions = []
         for n in range(len(X)):
             X_n = X[n][None].transpose(1, 0, 2)
-            pred = self.predict_function(X_n)[0]
+            mask = np.ones((len(X_n), 1)).astype(theano.config.floatX)
+            pred = self.predict_function(X_n, mask)[0]
             predictions.append(pred)
         return predictions
