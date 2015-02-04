@@ -10,7 +10,7 @@ n_h = 6
 n_y = 3
 time_steps = 10
 n_seq = 100
-# n_y is equal to the number of calsses
+# n_y is equal to the number of classes
 random_state = np.random.RandomState(1999)
 
 seq = random_state.randn(n_seq, time_steps, n_u)
