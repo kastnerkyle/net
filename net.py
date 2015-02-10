@@ -90,8 +90,9 @@ def make_minibatch(X, y, one_hot_size):
     else:
         raise ValueError("y must be 2 or 3 dimensional!")
 
-    if not np.all(np.in1d([0, 1], np.unique(y.ravel()))):
-        is_one_hot = False
+    for y_t in y:
+        if not np.all(np.in1d([0, 1], np.unique(y_t.ravel()))):
+            is_one_hot = False
     X_n = np.zeros(X_max_sizes, dtype=X[0].dtype)
     y_n = np.zeros(y_max_sizes).astype(theano.config.floatX)
     X_mask = np.zeros((X_max_sizes[0], X_max_sizes[1])).astype(
@@ -1460,10 +1461,15 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             shp = output.shape
             output = output.reshape([shp[0] * shp[1], shp[2]])
             y_hat_sym = T.nnet.softmax(output)
+
             # Need to apply mask so that cost isn't punished
-            y_sym_reshaped = (y_sym * y_mask[:, :, None]).reshape(
+            y_sym_reshaped = (y_sym * y_mask.dimshuffle(0, 1, 'x')).reshape(
                 [shp[0] * shp[1], shp[2]])
+            y_sym_reshaped = y_sym.reshape([shp[0] * shp[1], shp[2]])
             cost = -T.mean((y_sym_reshaped * T.log(y_hat_sym)).sum(axis=1))
+        else:
+            raise ValueError("Value of %s not a valid cost!"
+                             % self.cost)
 
         self.params_ = params
 
@@ -1473,6 +1479,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         elif self.learning_alg == "rmsprop":
             updates = self.get_clip_rmsprop_updates(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
+        elif self.learning_alg == "sfg":
             updates = self.get_sfg_updates(
                 X_sym, y_sym, params, cost, self.learning_rate, self.momentum)
         else:
@@ -1508,11 +1515,10 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                                                 outputs=cost,
                                                 on_unused_input="warn")
 
-            """
             self.predict_function = theano.function(
-                inputs=[X_sym, X_mask],
+                inputs=[X_sym, X_mask, y_sym, y_mask],
                 outputs=y_hat_sym)
-            """
+
 
     def fit(self, X, y, valid_X=None, valid_y=None):
         if self.input_checking:
@@ -1538,6 +1544,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
         self.layer_sizes_.extend(self.hidden_layer_sizes)
         self.layer_sizes_.append(output_size)
         if not hasattr(self, 'fit_function'):
+            print("Building model!")
             self._setup_functions(X_sym, y_sym, X_mask, y_mask,
                                   self.layer_sizes_)
         self.training_loss_ = []
@@ -1572,7 +1579,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
 
             if valid_X is not None:
                 total_valid_loss = 0
-                for i, j in minibatch_indices(X, self.minibatch_size):
+                for i, j in minibatch_indices(valid_X, self.minibatch_size):
                     valid_X_n, valid_y_n, X_mask, y_mask = make_minibatch(
                         valid_X[i:j], valid_y[i:j], output_size)
                     valid_loss = self.loss_function(valid_X_n, valid_y_n,
@@ -1587,22 +1594,25 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                     cPickle.dump(self, f, protocol=2)
                     f.close()
 
+
     def predict(self, X):
+        raise ValueError("Not yet implemented!")
         X = rnn_check_array(X)
         predictions = []
         for n in range(len(X)):
             X_n = X[n][None].transpose(1, 0, 2)
-            mask = np.ones((len(X_n), 1)).astype(theano.config.floatX)
-            pred = np.argmax(self.predict_function(X_n, mask)[0], axis=1)
+            X_mask = np.ones((len(X_n), 1)).astype(theano.config.floatX)
+            pred = np.argmax(self.predict_function(X_n, X_mask)[0], axis=1)
             predictions.append(pred)
         return predictions
 
     def predict_proba(self, X):
+        raise ValueError("Not yet implemented!")
         X = rnn_check_array(X)
         predictions = []
         for n in range(len(X)):
             X_n = X[n][None].transpose(1, 0, 2)
-            mask = np.ones((len(X_n), 1)).astype(theano.config.floatX)
-            pred = self.predict_function(X_n, mask)[0]
+            X_mask = np.ones((len(X_n), 1)).astype(theano.config.floatX)
+            pred = self.predict_function(X_n, X_mask)[0]
             predictions.append(pred)
         return predictions
