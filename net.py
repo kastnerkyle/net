@@ -856,7 +856,7 @@ class TrainingMixin(object):
         return updates
 
 
-def build_linear_layer(input_size, output_size, input_variable, random_state):
+def init_linear_layer(input_size, output_size, random_state):
     W_values = np.asarray(random_state.uniform(
         low=-np.sqrt(6. / (input_size + output_size)),
         high=np.sqrt(6. / (input_size + output_size)),
@@ -864,22 +864,42 @@ def build_linear_layer(input_size, output_size, input_variable, random_state):
     W = theano.shared(value=W_values, name='W', borrow=True)
     b_values = np.zeros((output_size,), dtype=theano.config.floatX)
     b = theano.shared(value=b_values, name='b', borrow=True)
-    output_variable = T.dot(input_variable, W) + b
     params = [W, b]
+    return params
+
+
+def build_linear_layer_from_params(params, input_variable):
+    W, b = params
+    output_variable = T.dot(input_variable, W) + b
+    return output_variable, params
+
+
+def build_linear_layer(input_size, output_size, input_variable, random_state):
+    params = init_linear_layer(input_size, output_size, random_state)
+    return build_linear_layer_from_params(params, input_variable)
+
+
+def init_tanh_layer(input_size, output_size, random_state):
+    W_values = np.asarray(random_state.uniform(
+        low=-np.sqrt(6. / (input_size + output_size)),
+        high=np.sqrt(6. / (input_size + output_size)),
+        size=(input_size, output_size)), dtype=theano.config.floatX)
+    W = theano.shared(value=W_values, name='W', borrow=True)
+    b_values = np.zeros((output_size,), dtype=theano.config.floatX)
+    b = theano.shared(value=b_values, name='b', borrow=True)
+    params = [W, b]
+    return params
+
+
+def build_tanh_layer_from_params(params, input_variable):
+    W, b = params
+    output_variable = T.tanh(T.dot(input_variable, W) + b)
     return output_variable, params
 
 
 def build_tanh_layer(input_size, output_size, input_variable, random_state):
-    W_values = np.asarray(random_state.uniform(
-        low=-np.sqrt(6. / (input_size + output_size)),
-        high=np.sqrt(6. / (input_size + output_size)),
-        size=(input_size, output_size)), dtype=theano.config.floatX)
-    W = theano.shared(value=W_values, name='W', borrow=True)
-    b_values = np.zeros((output_size,), dtype=theano.config.floatX)
-    b = theano.shared(value=b_values, name='b', borrow=True)
-    output_variable = T.tanh(T.dot(input_variable, W) + b)
-    params = [W, b]
-    return output_variable, params
+    params = init_tanh_layer(input_size, output_size, random_state)
+    return build_tanh_layer_from_params(params, input_variable)
 
 
 def build_relu_layer(input_size, output_size, input_variable, random_state):
@@ -910,7 +930,6 @@ def build_sigmoid_layer(input_size, output_size, input_variable, random_state):
 
 def softmax_cost(y_hat_sym, y_sym):
     return -T.mean(T.log(y_hat_sym)[T.arange(y_sym.shape[0]), y_sym])
-
 
 """
 class FeedforwardNetwork(BaseNet, TrainingMixin):
@@ -1031,11 +1050,8 @@ class FeedforwardNetwork(BaseNet, TrainingMixin):
 """
 
 
-def build_recurrent_conditional_lstm_layer(input_size, hidden_size, output_size,
-                                           input_variable, mask, context,
-                                           context_mask, init_state,
-                                           init_memory, random_state,
-                                           debug_step=False):
+def init_recurrent_conditional_lstm_layer(input_size, hidden_size, output_size,
+                                          random_state):
     # input to LSTM
     W_ = np.concatenate(
         [np_rand((input_size, hidden_size), random_state),
@@ -1057,6 +1073,7 @@ def build_recurrent_conditional_lstm_layer(input_size, hidden_size, output_size,
     U = theano.shared(U_, borrow=True)
 
     # bias to LSTM
+    # TODO: Ilya init for biases...
     b = shared_zeros((4 * hidden_size,))
 
     # Context to LSTM
@@ -1075,12 +1092,42 @@ def build_recurrent_conditional_lstm_layer(input_size, hidden_size, output_size,
     U_att = shared_rand((output_size, 1), random_state)
     c_att = shared_zeros((1,))
 
-    # TODO: Ilya init for biases...
     params = [W, U, b, Wc, Wc_att, Wd_att, b_att, U_att, c_att]
+
+    return params
+
+
+def build_recurrent_conditional_lstm_layer(input_size, hidden_size, output_size,
+                                           input_variable, mask, context,
+                                           context_mask, init_state,
+                                           init_memory, random_state,
+                                           one_step=False):
+    params = init_recurrent_conditional_lstm_layer(input_size, hidden_size,
+                                                   output_size, random_state)
+
+    return build_recurrent_conditional_lstm_layer_from_params(params,
+                                                              input_variable,
+                                                              mask, context,
+                                                              context_mask,
+                                                              init_state,
+                                                              init_memory,
+                                                              random_state,
+                                                              one_step=one_step)
+
+
+def build_recurrent_conditional_lstm_layer_from_params(params, input_variable,
+                                                       mask, context,
+                                                       context_mask, init_state,
+                                                       init_memory,
+                                                       random_state,
+                                                       one_step=False):
+    [W, U, b, Wc, Wc_att, Wd_att, b_att, U_att, c_att] = params
 
     n_steps = input_variable.shape[0]
     n_samples = input_variable.shape[1]
     n_features = input_variable.shape[2]
+
+    hidden_size = U.shape[0]
 
     # projected context
     projected_context = T.dot(context, Wc_att) + b_att
@@ -1121,16 +1168,16 @@ def build_recurrent_conditional_lstm_layer(input_size, hidden_size, output_size,
                 i_t, f_t, o_t, preactivation)
 
     init_context = T.zeros((n_samples, context.shape[2]),
-                           dtype=theano.config.floatX)
+                            dtype=theano.config.floatX)
     init_att = T.zeros((n_samples, context.shape[0]),
-                       dtype=theano.config.floatX)
+                        dtype=theano.config.floatX)
     # Scan cannot handle batch sizes of 1?
     # Unbroadcast can fix it... but still weird
     #https://github.com/Theano/Theano/issues/1772
     #init_context = T.unbroadcast(init_context, 0)
     #init_att = T.unbroadcast(init_att, 0)
 
-    if debug_step:
+    if one_step:
         rval = step(x, mask, init_state, init_memory, None, None,
                     projected_context)
     else:
@@ -1142,15 +1189,15 @@ def build_recurrent_conditional_lstm_layer(input_size, hidden_size, output_size,
                               non_sequences=[projected_context,],
                               n_steps=n_steps)
 
-    hidden = rval[0]
-    final_context = rval[2]
-    final_att = rval[3]
-    return hidden, final_context, final_att, params
+    #hidden = rval[0]
+    #state = rval[1]
+    #final_context = rval[2]
+    #final_att = rval[3]
+    return rval[:4], params
 
 
-def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
-                               input_variable, mask,
-                               random_state, debug_step=False):
+def init_recurrent_lstm_layer(input_size, hidden_size, output_size,
+                              random_state):
     # input to LSTM
     W_ = np.concatenate(
         [np_rand((input_size, hidden_size), random_state),
@@ -1174,8 +1221,25 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
     # bias to LSTM
     b = shared_zeros((4 * hidden_size,))
 
-    # TODO: Ilya init for biases...
     params = [W, U, b]
+    return params
+
+
+def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
+                               input_variable, mask,
+                               random_state, one_step=False):
+    params = init_recurrent_lstm_layer(input_size, hidden_size, output_size,
+                                       random_state)
+    return build_recurrent_lstm_layer_from_params(params, input_variable, mask,
+                                                  random_state,
+                                                  one_step=one_step)
+
+
+def build_recurrent_lstm_layer_from_params(params, input_variable, mask,
+                                           random_state, one_step=False):
+    [W, U, b] = params
+
+    hidden_size = U.shape[0]
 
     n_steps = input_variable.shape[0]
     n_samples = input_variable.shape[1]
@@ -1212,7 +1276,7 @@ def build_recurrent_lstm_layer(input_size, hidden_size, output_size,
     init_cell = T.unbroadcast(init_cell, 0)
 
     x = T.dot(input_variable, W) + b
-    if debug_step:
+    if one_step:
         rval = step(x, mask, init_hidden, init_cell)
     else:
         rval, _ = theano.scan(step,
@@ -1229,13 +1293,14 @@ def recurrence_relation(size):
     """
     Based on code from Shawn Tan
     """
+
     eye2 = T.eye(size + 2)
     return T.eye(size) + eye2[2:, 1:-1] + eye2[2:, :-2] * (T.arange(size) % 2)
 
 
 def path_probs(predict, y_sym):
     """
-    Based on code from Shawn Tan
+    Based on code from Rakesh - blank is assumed to be highest class in y_sym
     """
     pred_y = predict[:, y_sym]
     rr = recurrence_relation(y_sym.shape[0])
@@ -1410,6 +1475,7 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             sz = hidden_sizes[-1]
 
         if self.cost == "softmax":
+            # easy mode
             output, output_params = build_linear_layer(sz, output_size,
                                                        input_variable,
                                                        self.random_state)
@@ -1421,43 +1487,77 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
             cost = -T.mean((y_sym_reshaped * T.log(y_hat_sym)).sum(axis=1))
 
         elif self.cost == "encdec":
+            # hardmode
             context = input_variable
             context_mean = context[0]
+
             init_state, state_params = build_tanh_layer(sz, hidden_sizes[-1],
                                                         context_mean,
                                                         self.random_state)
             init_memory, memory_params = build_tanh_layer(sz, hidden_sizes[-1],
                                                           context_mean,
                                                           self.random_state)
+            # partial sampler setup
+            self._encode = theano.function([X_sym, X_mask],
+                                           [init_state, init_memory, context])
+            init_state_sampler = T.matrix()
+            init_memory_sampler = T.matrix()
+            y_sw_sampler = T.tensor3()
+            y_sw_mask = T.alloc(1., y_sw_sampler.shape[0], 1)
+
+            # need this style of init to reuse params for sampler and actual
+            # training. This makes this part quite nasty - dictionary
+            # for initialization and params is making more and more sense.
+            # conditional params will be reused below
+            conditional_params = init_recurrent_conditional_lstm_layer(
+                output_size, hidden_sizes[-1], sz, self.random_state)
+
+            rval, _p = build_recurrent_conditional_lstm_layer_from_params(
+                conditional_params, y_sw_sampler, y_sw_mask, context, X_mask,
+                init_state_sampler, init_memory_sampler,
+                self.random_state, one_step=True)
+            next_state, next_memory, sampler_contexts, _ = rval
+            #end sampler parts... for now
+
             params = params + state_params + memory_params
             shifted_labels = T.zeros_like(y_sym)
             shifted_labels = T.set_subtensor(shifted_labels[1:], y_sym[:-1])
-            # Needed so we can calculate updates
             y_sym = shifted_labels
-            (projected_hidden, contexts,
-             attention, params) = build_recurrent_conditional_lstm_layer(
-                output_size, hidden_sizes[-1], sz, shifted_labels,
-                 y_mask, context, X_mask, init_state, init_memory,
-                 self.random_state)
-            logit_hidden, lh_params = build_linear_layer(hidden_sizes[-1],
-                                                         output_size,
-                                                         projected_hidden,
-                                                         self.random_state)
+
+            rval, _p = build_recurrent_conditional_lstm_layer_from_params(
+                conditional_params, shifted_labels, y_mask, context, X_mask,
+                init_state, init_memory, self.random_state)
+            projected_hidden, _, contexts, attention = rval
+
+            params = params + conditional_params
+
+            # once again, need to use same params for sample gen
+            lh_params = init_linear_layer(hidden_sizes[-1], output_size,
+                                          self.random_state)
+            logit_hidden, _ = build_linear_layer_from_params(lh_params,
+                                                             projected_hidden)
             params = params + lh_params
-            logit_out, lo_params = build_linear_layer(output_size,
-                                                      output_size,
-                                                      y_sym,
-                                                      self.random_state)
+
+            lo_params = init_linear_layer(output_size, output_size,
+                                          self.random_state)
+            logit_out, _ = build_linear_layer_from_params(lo_params,
+                                                             y_sym)
             params = params + lo_params
-            logit_contexts, lc_params = build_linear_layer(sz,
-                                                           output_size,
-                                                           contexts,
-                                                           self.random_state)
+
+
+            lc_params = init_linear_layer(sz, output_size,
+                                          self.random_state)
+            logit_contexts, _ = build_linear_layer_from_params(lc_params,
+                                                               contexts)
             params = params + lc_params
+
             logit = T.tanh(logit_hidden + logit_out + logit_contexts)
-            output, output_params = build_linear_layer(output_size, output_size,
-                                                       logit, self.random_state)
+            output_params = init_linear_layer(output_size, output_size,
+                                              self.random_state)
+            output, _ = build_linear_layer_from_params(output_params,
+                                                       logit)
             params = params + output_params
+
             shp = output.shape
             output = output.reshape([shp[0] * shp[1], shp[2]])
             y_hat_sym = T.nnet.softmax(output)
@@ -1467,6 +1567,26 @@ class RecurrentNetwork(BaseNet, TrainingMixin):
                 [shp[0] * shp[1], shp[2]])
             y_sym_reshaped = y_sym.reshape([shp[0] * shp[1], shp[2]])
             cost = -T.mean((y_sym_reshaped * T.log(y_hat_sym)).sum(axis=1))
+
+            # Finish sampler
+            logit_sampler_hidden, _ = build_linear_layer_from_params(lh_params,
+                                                                     next_state)
+            logit_sampler_out, _ = build_linear_layer_from_params(lo_params,
+                                                                  y_sw_sampler)
+            logit_sampler_contexts, _ = build_linear_layer_from_params(
+                lc_params, sampler_contexts)
+            logit_sampler = T.tanh(logit_sampler_hidden + logit_sampler_out
+                                   + logit_sampler_contexts)
+            output_sampler, _ = build_linear_layer_from_params(output_params,
+                                                       logit_sampler)
+            shp = output_sampler.shape
+            output_sampler = output_sampler.reshape([shp[0] * shp[1], shp[2]])
+            y_hat_sampler = T.nnet.softmax(output_sampler)
+            self._sampler_step = theano.function(
+                [y_sw_sampler, context, X_mask, init_state_sampler,
+                 init_memory_sampler],
+                [y_hat_sampler, next_state, next_memory])
+
         else:
             raise ValueError("Value of %s not a valid cost!"
                              % self.cost)
